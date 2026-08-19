@@ -1,0 +1,13 @@
+services:
+  scalescope:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      SCALESCOPE_MODE: demo
+      SCALESCOPE_TICK_SECONDS: "2.0"
+    volumes:
+      - scalescope-data:/data
+
+volumes:
+  scalescope-data:

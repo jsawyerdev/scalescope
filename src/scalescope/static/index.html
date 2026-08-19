@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ScaleScope</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+<header>
+  <h1>ScaleScope</h1>
+  <span class="subtitle">predictive Kubernetes capacity intelligence &mdash; demo mode</span>
+  <label class="model-picker">
+    model
+    <select id="model-select">
+      <option value="naive">naive</option>
+      <option value="seasonal_naive">seasonal_naive</option>
+      <option value="ewma">ewma</option>
+      <option value="linear_trend">linear_trend</option>
+      <option value="auto_ets" selected>auto_ets</option>
+      <option value="lightgbm_quantile">lightgbm_quantile</option>
+    </select>
+  </label>
+</header>
+
+<div id="diagnosis-banner" class="banner">connecting&hellip;</div>
+
+<section class="stats">
+  <div class="stat"><span class="label">current replicas</span><span class="value" id="stat-current-replicas">&mdash;</span></div>
+  <div class="stat"><span class="label">recommended</span><span class="value" id="stat-recommended-replicas">&mdash;</span></div>
+  <div class="stat"><span class="label">cpu</span><span class="value" id="stat-cpu">&mdash;</span></div>
+  <div class="stat"><span class="label">memory</span><span class="value" id="stat-memory">&mdash;</span></div>
+  <div class="stat"><span class="label">p95 latency</span><span class="value" id="stat-latency">&mdash;</span></div>
+  <div class="stat"><span class="label">confidence</span><span class="value" id="stat-confidence">&mdash;</span></div>
+</section>
+
+<section class="chart-wrap">
+  <canvas id="request-rate-chart"></canvas>
+</section>
+
+<script src="app.js"></script>
+</body>
+</html>
