@@ -11,13 +11,34 @@
 <header>
   <div class="brand">
     <h1>ScaleScope</h1>
-    <span class="subtitle">predictive capacity intelligence &mdash; demo mode</span>
+    <span class="subtitle">predictive capacity intelligence</span>
   </div>
   <label class="field">
     <span class="field-label">workload</span>
     <select id="workload-select"></select>
   </label>
 </header>
+
+<section class="panel source-panel">
+  <div class="source-row">
+    <div class="evidence-item">
+      <span class="field-label">mode</span>
+      <span id="mode-badge" class="badge mode">&mdash;</span>
+    </div>
+    <div class="evidence-item source-target">
+      <span class="field-label">observing</span>
+      <span id="source-target-text" class="mono">&mdash;</span>
+    </div>
+    <div class="evidence-item">
+      <span class="field-label">connection</span>
+      <div class="freshness-line">
+        <span id="source-conn-dot" class="dot"></span>
+        <span id="source-conn-text">&mdash;</span>
+      </div>
+    </div>
+  </div>
+  <div id="source-error" class="fetch-error" hidden></div>
+</section>
 
 <section class="panel evidence-panel">
   <div class="evidence-row">
@@ -36,7 +57,7 @@
       </div>
     </div>
     <div class="evidence-item">
-      <span class="field-label">source</span>
+      <span class="field-label">workload</span>
       <span id="source-text" class="mono">&mdash;</span>
     </div>
   </div>
@@ -83,9 +104,34 @@
 <section class="panel chart-panel">
   <div class="panel-header">
     <h2>Forecast &mdash; <span id="chart-model-name">&mdash;</span></h2>
-    <span class="panel-note">solid line = observed request rate; dashed = forecast p50; shaded band = p10&ndash;p90 interval (estimated, not observed)</span>
+    <span class="panel-note">solid line = observed request rate; dashed = selected model's forecast p50 with shaded p10&ndash;p90 band; thin lines = every other registered model's p50, for trajectory comparison</span>
   </div>
   <div class="chart-wrap"><canvas id="request-rate-chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-header">
+    <h2>Raw observations</h2>
+    <span class="panel-note">last 40 simulator ticks, newest first &mdash; unprocessed values as written to storage</span>
+  </div>
+  <div class="table-wrap log-wrap">
+    <table id="log-table" class="mono">
+      <thead>
+        <tr>
+          <th>ts</th>
+          <th class="num">replicas</th>
+          <th class="num">req/s</th>
+          <th class="num">cpu%</th>
+          <th class="num">throttled%</th>
+          <th class="num">p95 ms</th>
+          <th class="num">error%</th>
+          <th class="num">pending</th>
+          <th class="num">restarts</th>
+        </tr>
+      </thead>
+      <tbody id="log-body"></tbody>
+    </table>
+  </div>
 </section>
 
 <script src="app.js"></script>

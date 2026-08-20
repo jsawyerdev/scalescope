@@ -2,13 +2,13 @@
   --bg: #f4f6f9;
   --surface: #ffffff;
   --surface-alt: #eef2f7;
-  --border: #ccd5e0;
-  --border-strong: #8fa0b8;
+  --border: #cdd6e3;
+  --border-strong: #75839e;
   --text: #16202e;
   --text-muted: #52627a;
   --text-faint: #8493a8;
-  --accent: #1c5490;
-  --accent-soft: #e2ebf5;
+  --accent: #1a3e7c;
+  --accent-soft: #e4eaf7;
   --good: #2e7d4f;
   --good-soft: #e3f1e8;
   --warn: #9a6a10;
@@ -99,6 +99,45 @@ select {
   display: grid;
   grid-template-columns: 2fr 1fr 1.4fr;
   gap: 1.5rem;
+}
+
+.source-panel {
+  padding: 0.85rem 1rem;
+  border-color: var(--border-strong);
+}
+
+.source-row {
+  display: grid;
+  grid-template-columns: auto 2fr 1.4fr;
+  gap: 1.5rem;
+  align-items: start;
+}
+
+.source-target {
+  min-width: 0;
+}
+
+#source-target-text {
+  font-size: 0.85rem;
+  color: var(--text);
+  white-space: pre-line;
+}
+
+#source-conn-text {
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+.badge.mode {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.badge.mode.demo {
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+  background: var(--surface-alt);
 }
 
 .evidence-item {
@@ -302,6 +341,22 @@ tbody tr.selected td {
 .chart-panel .chart-wrap {
   padding: 1rem;
   height: 380px;
+}
+
+.log-wrap {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.log-wrap table.mono td,
+.log-wrap table.mono th {
+  font-family: var(--font-mono);
+}
+
+.log-wrap thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
 }
 
 canvas {
