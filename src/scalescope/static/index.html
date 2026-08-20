@@ -40,6 +40,19 @@
   <div id="source-error" class="fetch-error" hidden></div>
 </section>
 
+<section class="panel trigger-panel">
+  <div class="panel-header">
+    <h2>Generate load</h2>
+    <span class="panel-note">forces a pattern on the live workload now, so its effect on the metrics/diagnosis below is visible within a few ticks</span>
+  </div>
+  <div class="trigger-row">
+    <button class="trigger-btn" data-kind="cpu">CPU spike</button>
+    <button class="trigger-btn" data-kind="memory">Memory leak</button>
+    <button class="trigger-btn" data-kind="traffic">Traffic spike</button>
+    <span id="trigger-status" class="trigger-status">&mdash;</span>
+  </div>
+</section>
+
 <section class="panel evidence-panel">
   <div class="evidence-row">
     <div class="evidence-item">

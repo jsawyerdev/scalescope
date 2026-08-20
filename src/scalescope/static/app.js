@@ -44,6 +44,15 @@ async function fetchJson(url) {
   return response.json();
 }
 
+async function postJson(url) {
+  const response = await fetch(url, { method: "POST" });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.detail || `${url} -> ${response.status}`);
+  }
+  return body;
+}
+
 // Observation timestamps are UTC but serialized without an offset; append
 // "Z" so the browser parses them as UTC instead of local time.
 function parseTs(ts) {
@@ -353,6 +362,52 @@ async function refresh() {
   }
 }
 
+const TRIGGER_DURATION_SECONDS = 45;
+
+function wireTriggerButtons() {
+  const buttons = document.querySelectorAll(".trigger-btn");
+  const status = document.getElementById("trigger-status");
+  let countdownTimer = null;
+
+  function setBusy(busy) {
+    buttons.forEach((btn) => (btn.disabled = busy));
+  }
+
+  function startCountdown(kind, endsAt) {
+    clearInterval(countdownTimer);
+    countdownTimer = setInterval(() => {
+      const remaining = Math.ceil((endsAt - Date.now()) / 1000);
+      if (remaining <= 0) {
+        clearInterval(countdownTimer);
+        status.textContent = "no trigger active";
+        status.classList.remove("active");
+        setBusy(false);
+        return;
+      }
+      status.textContent = `${kind} spike active – ${remaining}s remaining`;
+    }, 1000);
+  }
+
+  buttons.forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!currentWorkload) return;
+      setBusy(true);
+      status.classList.add("active");
+      status.textContent = `triggering ${btn.dataset.kind}…`;
+      try {
+        await postJson(
+          `/api/workloads/${currentWorkload}/trigger?kind=${btn.dataset.kind}&duration_seconds=${TRIGGER_DURATION_SECONDS}`
+        );
+        startCountdown(btn.dataset.kind, Date.now() + TRIGGER_DURATION_SECONDS * 1000);
+        setBusy(false);
+      } catch (err) {
+        status.textContent = `trigger failed: ${err.message}`;
+        setBusy(false);
+      }
+    });
+  });
+}
+
 async function loadWorkloads() {
   const workloads = await fetchJson("/api/workloads");
   if (workloads.length === 0) {
@@ -377,4 +432,5 @@ async function loadWorkloads() {
   }
 }
 
+wireTriggerButtons();
 loadWorkloads();
