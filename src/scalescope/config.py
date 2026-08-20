@@ -18,6 +18,10 @@ class Settings:
     forecast_horizon_steps: int = int(os.environ.get("SCALESCOPE_HORIZON_STEPS", "30"))
     history_window_steps: int = int(os.environ.get("SCALESCOPE_HISTORY_STEPS", "600"))
     log_level: str = os.environ.get("SCALESCOPE_LOG_LEVEL", "INFO")
+    k8s_namespace: str = os.environ.get("SCALESCOPE_K8S_NAMESPACE", "scalescope-demo")
+    k8s_deployment: str = os.environ.get("SCALESCOPE_K8S_DEPLOYMENT", "sample-workload")
+    k8s_kubeconfig: str | None = os.environ.get("SCALESCOPE_K8S_KUBECONFIG")
+    k8s_metrics_url: str | None = os.environ.get("SCALESCOPE_K8S_METRICS_URL")
 
 
 settings = Settings()
