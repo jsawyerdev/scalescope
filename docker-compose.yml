@@ -10,5 +10,32 @@ services:
     volumes:
       - scalescope-data:/data
 
+  # Real-cluster instance. Opt-in (`docker compose --profile observe up -d`)
+  # since it needs a kubeconfig for the scalescope-observer identity
+  # (scripts/generate-observer-kubeconfig.sh, after applying k8s/rbac/) and
+  # a route to the workload's own /metrics for real request-rate/latency/
+  # error-rate - a `kubectl port-forward -n <namespace> svc/<name> 18080:80`
+  # running on the host is the simplest way to provide that from outside
+  # the cluster; SCALESCOPE_K8S_METRICS_URL below assumes that convention.
+  scalescope-observe:
+    build: .
+    restart: unless-stopped
+    profiles: ["observe"]
+    ports:
+      - "8001:8000"
+    environment:
+      SCALESCOPE_MODE: observe
+      SCALESCOPE_TICK_SECONDS: "2.0"
+      SCALESCOPE_K8S_NAMESPACE: "${SCALESCOPE_K8S_NAMESPACE:-scalescope-demo}"
+      SCALESCOPE_K8S_DEPLOYMENT: "${SCALESCOPE_K8S_DEPLOYMENT:-sample-workload}"
+      SCALESCOPE_K8S_KUBECONFIG: /kubeconfig/observer.kubeconfig
+      SCALESCOPE_K8S_METRICS_URL: "${SCALESCOPE_K8S_METRICS_URL:-http://host.docker.internal:18080/metrics}"
+    volumes:
+      - scalescope-observe-data:/data
+      - "${SCALESCOPE_OBSERVER_KUBECONFIG:-./scalescope-observer.kubeconfig}:/kubeconfig/observer.kubeconfig:ro"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
 volumes:
   scalescope-data:
+  scalescope-observe-data:

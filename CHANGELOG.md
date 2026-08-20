@@ -4,6 +4,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.3.1]
+
+### Added
+
+- `docker-compose.yml`: formalized the OBSERVE instance as a real service
+  (`scalescope-observe`, opt-in via `--profile observe`) instead of a
+  manually-run `docker run` command that only existed in shell history.
+  Configurable via `.env` (see `.env.example`) for the namespace/deployment/
+  kubeconfig path/metrics URL.
+- `scripts/rebuild.sh`: now does a real teardown (`docker compose down`)
+  before rebuilding, not just `up -d --force-recreate`. New flags:
+  `--observe` (also tear down/rebuild/verify the OBSERVE instance; fails
+  fast with setup instructions if no kubeconfig is present rather than
+  silently skipping) and `--wipe-data` (drop the DuckDB volume(s) for a
+  clean-slate rebuild instead of preserving history across it).
+
 ## [0.3.0]
 
 ### Fixed

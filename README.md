@@ -136,10 +136,17 @@ Environment variables (see `src/scalescope/config.py`):
 | `SCALESCOPE_K8S_KUBECONFIG` | unset | Kubeconfig path; unset tries in-cluster config, then default kubeconfig discovery |
 | `SCALESCOPE_K8S_METRICS_URL` | unset | Workload's own `/metrics` URL, for real `request_rate`/`latency_p95_ms`/`error_rate` |
 
-To rebuild against the latest dependency versions `pyproject.toml` allows and
-produce a fresh Docker image, run `./scripts/rebuild.sh`. It records the
-resolved package set to `requirements-lock.txt` and leaves the DEMO-mode
-service running (via `docker compose`) once it's built and health-checked.
+To fully tear down and rebuild against the latest dependency versions
+`pyproject.toml` allows, run `./scripts/rebuild.sh`. It records the resolved
+package set to `requirements-lock.txt` and leaves the service(s) running
+(via `docker compose`) once built and health-checked.
+
+- `./scripts/rebuild.sh` — DEMO instance only (`localhost:8000`).
+- `./scripts/rebuild.sh --observe` — also tears down/rebuilds the OBSERVE
+  instance (`localhost:8001`); requires `k8s/rbac/` already applied and a
+  kubeconfig from `generate-observer-kubeconfig.sh` (see below).
+- `./scripts/rebuild.sh --wipe-data` — also drops the DuckDB volume(s), for
+  a clean-slate rebuild instead of preserving history across it.
 
 ## Wiring in a real cluster (OBSERVE mode)
 
@@ -158,9 +165,12 @@ to the cluster. `k8s/rbac/` defines a least-privilege identity for this:
    contains a live cluster credential — never commit it** (already covered by
    `.gitignore`).
 3. Deploy something to observe — `sample-workload/` (below) is a ready-made
-   test target — then run ScaleScope with `SCALESCOPE_MODE=observe`,
-   `SCALESCOPE_K8S_KUBECONFIG` pointed at the generated file, and
-   `SCALESCOPE_K8S_NAMESPACE`/`SCALESCOPE_K8S_DEPLOYMENT` set to match.
+   test target. Then either `./scripts/rebuild.sh --observe` (brings up
+   both DEMO and OBSERVE via `docker compose`, reading `SCALESCOPE_K8S_*`
+   overrides from `.env` — see `.env.example`), or run ScaleScope directly
+   with `SCALESCOPE_MODE=observe`, `SCALESCOPE_K8S_KUBECONFIG` pointed at
+   the generated file, and `SCALESCOPE_K8S_NAMESPACE`/
+   `SCALESCOPE_K8S_DEPLOYMENT` set to match.
 
 Verify the identity is actually scoped before trusting it:
 `kubectl --kubeconfig=./scalescope-observer.kubeconfig auth can-i delete pods -n scalescope-demo`
