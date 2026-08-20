@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Rebuilds ScaleScope from scratch against the latest package versions
 # permitted by pyproject.toml's lower-bound constraints, validates the
-# result, and produces a fresh Docker image plus a version audit trail.
+# result, and leaves the service running via docker compose — this script
+# is the entry point to get a working instance up, not just a CI check.
 #
 # Because the Dockerfile has no pinned versions, this script always pulls
-# whatever is newest at run time (`pip install --upgrade`, `docker build
-# --no-cache --pull`). Re-running it later can therefore produce a
+# whatever is newest at run time (`pip install --upgrade`, `docker compose
+# build --no-cache --pull`). Re-running it later can therefore produce a
 # different, newer build even with no source changes; requirements-lock.txt
 # records exactly what was resolved for the build that ran.
 set -euo pipefail
@@ -13,9 +14,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-IMAGE_TAG="${IMAGE_TAG:-scalescope:dev}"
 VENV_DIR="$ROOT_DIR/.venv"
 LOCK_FILE="$ROOT_DIR/requirements-lock.txt"
+APP_URL="http://localhost:8000"
 
 echo "== rebuilding venv: $VENV_DIR =="
 rm -rf "$VENV_DIR"
@@ -39,29 +40,28 @@ ruff check src tests
 echo "== tests =="
 pytest -q
 
-echo "== docker build (no cache, latest base image) =="
-docker build --no-cache --pull -t "$IMAGE_TAG" .
+echo "== docker compose build (no cache, latest base image) =="
+docker compose build --no-cache --pull
 
-echo "== container smoke test =="
-CONTAINER_NAME="scalescope-rebuild-smoke"
-docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-docker run -d --name "$CONTAINER_NAME" -p 18123:8000 -e SCALESCOPE_TICK_SECONDS=0.3 "$IMAGE_TAG" >/dev/null
+echo "== starting service =="
+docker compose up -d --force-recreate
 
-cleanup() { docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
+on_failure() {
+    echo "STARTUP FAILED: $APP_URL/api/workloads did not respond as expected" >&2
+    docker compose logs >&2
+    docker compose down
+    exit 1
+}
+trap on_failure ERR
 
-for _ in $(seq 1 20); do
-    if curl -sf http://localhost:18123/api/workloads >/dev/null; then
+for _ in $(seq 1 30); do
+    if curl -sf "$APP_URL/api/workloads" >/dev/null 2>&1; then
         break
     fi
     sleep 1
 done
+curl -sf "$APP_URL/api/workloads" | grep -q payments-api
+trap - ERR
 
-if ! curl -sf http://localhost:18123/api/workloads | grep -q payments-api; then
-    echo "SMOKE TEST FAILED: /api/workloads did not return the expected workload" >&2
-    docker logs "$CONTAINER_NAME" >&2
-    exit 1
-fi
-
-echo "== done: $IMAGE_TAG built and verified =="
-docker images "$IMAGE_TAG" --format "image size: {{.Size}}"
+echo "== done: ScaleScope is running at $APP_URL =="
+docker compose ps
