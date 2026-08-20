@@ -45,9 +45,7 @@ class SeasonalNaiveModel:
         if len(history) < _SEASONAL_PERIOD + _MIN_HISTORY:
             return NaiveModel().predict(history, horizon)
         seasonal_slice = history[-_SEASONAL_PERIOD:]
-        point = np.array(
-            [seasonal_slice[i % _SEASONAL_PERIOD] for i in range(horizon)]
-        )
+        point = np.array([seasonal_slice[i % _SEASONAL_PERIOD] for i in range(horizon)])
         std = _residual_std(history)
         p50, p10, p90 = _spread(point, std)
         return Forecast(self.name, p10, p50, p90)

@@ -25,17 +25,6 @@ CREATE TABLE IF NOT EXISTS observations (
     restarts INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS forecasts (
-    ts TIMESTAMP NOT NULL,
-    workload VARCHAR NOT NULL,
-    model VARCHAR NOT NULL,
-    horizon_step INTEGER NOT NULL,
-    target_ts TIMESTAMP NOT NULL,
-    p10 DOUBLE NOT NULL,
-    p50 DOUBLE NOT NULL,
-    p90 DOUBLE NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS recommendations (
     ts TIMESTAMP NOT NULL,
     workload VARCHAR NOT NULL,
@@ -96,30 +85,25 @@ class Store:
         )
 
     def recent_observations(self, workload: str, limit: int) -> pl.DataFrame:
-        return self._conn.execute(
-            """
+        return (
+            self._conn.execute(
+                """
             SELECT * FROM observations
             WHERE workload = ?
             ORDER BY ts DESC
             LIMIT ?
             """,
-            [workload, limit],
-        ).pl().sort("ts")
+                [workload, limit],
+            )
+            .pl()
+            .sort("ts")
+        )
 
     def workloads(self) -> list[str]:
-        rows = self._conn.execute("SELECT DISTINCT workload FROM observations").fetchall()
+        rows = self._conn.execute(
+            "SELECT DISTINCT workload FROM observations"
+        ).fetchall()
         return [r[0] for r in rows]
-
-    def latest_recommendation(self, workload: str) -> pl.DataFrame:
-        return self._conn.execute(
-            """
-            SELECT * FROM recommendations
-            WHERE workload = ?
-            ORDER BY ts DESC
-            LIMIT 1
-            """,
-            [workload],
-        ).pl()
 
     def close(self) -> None:
         self._conn.close()

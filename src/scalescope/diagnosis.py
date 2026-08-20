@@ -86,7 +86,10 @@ def diagnose(observations: pl.DataFrame, max_replicas: int = 30) -> DiagnosisRes
                 "a probable memory leak.",
             )
 
-    if latest["replicas"] >= max_replicas and latest["cpu_usage_pct"] >= CPU_HIGH_THRESHOLD_PCT:
+    if (
+        latest["replicas"] >= max_replicas
+        and latest["cpu_usage_pct"] >= CPU_HIGH_THRESHOLD_PCT
+    ):
         return DiagnosisResult(
             Diagnosis.HPA_CEILING,
             False,

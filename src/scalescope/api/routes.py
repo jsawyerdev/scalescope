@@ -8,8 +8,14 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from scalescope.capacity import recommend_replicas
+from scalescope.config import settings
 from scalescope.diagnosis import diagnose
-from scalescope.models.baselines import EwmaModel, LinearTrendModel, NaiveModel, SeasonalNaiveModel
+from scalescope.models.baselines import (
+    EwmaModel,
+    LinearTrendModel,
+    NaiveModel,
+    SeasonalNaiveModel,
+)
 from scalescope.models.lightgbm_model import LightGbmQuantileModel
 from scalescope.models.statsforecast_model import AutoEtsModel
 from scalescope.storage import Store
@@ -25,11 +31,14 @@ _MODELS = {
     "lightgbm_quantile": LightGbmQuantileModel(),
 }
 _DEFAULT_MODEL = "auto_ets"
-_HORIZON_STEPS = 30
+_HORIZON_STEPS = settings.forecast_horizon_steps
+_HISTORY_STEPS = settings.history_window_steps
 _STARTUP_LEAD_STEPS = 15  # models pod-startup + readiness lag in simulation ticks
 
 
 def get_store() -> Store:
+    # Deferred import: main.py imports this router at module load time, and
+    # app_state is only populated once the FastAPI lifespan starts.
     from scalescope.main import app_state
 
     return app_state["store"]
@@ -52,7 +61,7 @@ def get_observations(workload: str, limit: int = 300) -> list[dict[str, Any]]:
 def get_forecast(workload: str, model: str = _DEFAULT_MODEL) -> dict[str, Any]:
     if model not in _MODELS:
         raise HTTPException(status_code=400, detail=f"unknown model: {model}")
-    df = get_store().recent_observations(workload, 600)
+    df = get_store().recent_observations(workload, _HISTORY_STEPS)
     if df.is_empty():
         raise HTTPException(status_code=404, detail=f"unknown workload: {workload}")
 
@@ -87,7 +96,7 @@ def get_recommendation(workload: str, model: str = _DEFAULT_MODEL) -> dict[str, 
     if model not in _MODELS:
         raise HTTPException(status_code=400, detail=f"unknown model: {model}")
     store = get_store()
-    df = store.recent_observations(workload, 600)
+    df = store.recent_observations(workload, _HISTORY_STEPS)
     if df.is_empty():
         raise HTTPException(status_code=404, detail=f"unknown workload: {workload}")
 
@@ -101,7 +110,9 @@ def get_recommendation(workload: str, model: str = _DEFAULT_MODEL) -> dict[str, 
         "ts": datetime.now(UTC),
         "workload": workload,
         "current_replicas": rec.current_replicas,
-        "recommended_replicas": rec.recommended_replicas if diag.scaling_will_help else current_replicas,
+        "recommended_replicas": (
+            rec.recommended_replicas if diag.scaling_will_help else current_replicas
+        ),
         "reason": diag.explanation,
         "confidence": rec.confidence,
     }

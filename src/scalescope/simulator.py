@@ -109,20 +109,32 @@ class WorkloadSimulator:
 
         demand = self._demand()
         effective_capacity_per_pod = (
-            CAPACITY_PER_POD_RPS * 0.5 if self.state.cpu_limit_constrained else CAPACITY_PER_POD_RPS
+            CAPACITY_PER_POD_RPS * 0.5
+            if self.state.cpu_limit_constrained
+            else CAPACITY_PER_POD_RPS
         )
-        utilization_per_pod = demand / (self.state.replicas * effective_capacity_per_pod)
+        utilization_per_pod = demand / (
+            self.state.replicas * effective_capacity_per_pod
+        )
         cpu_usage_pct = min(1.0, utilization_per_pod) * 100
         cpu_throttled_pct = (
-            max(0.0, utilization_per_pod - 1.0) * 100 if self.state.cpu_limit_constrained else 0.0
+            max(0.0, utilization_per_pod - 1.0) * 100
+            if self.state.cpu_limit_constrained
+            else 0.0
         )
 
         self.state.memory_baseline_mb += self.state.memory_leak_mb_per_tick
         memory_usage_mb = self.state.memory_baseline_mb + self.state.rng.gauss(0, 5)
 
         saturation = max(0.0, utilization_per_pod - TARGET_CPU_UTILIZATION)
-        latency_p95_ms = BASE_LATENCY_MS * (1 + saturation * 6) + self.state.rng.gauss(0, 3)
-        error_rate = max(0.0, min(1.0, (utilization_per_pod - 0.95) * 2)) if utilization_per_pod > 0.95 else 0.0
+        latency_p95_ms = BASE_LATENCY_MS * (1 + saturation * 6) + self.state.rng.gauss(
+            0, 3
+        )
+        error_rate = (
+            max(0.0, min(1.0, (utilization_per_pod - 0.95) * 2))
+            if utilization_per_pod > 0.95
+            else 0.0
+        )
 
         restarts = 1 if memory_usage_mb > 900 else 0
         if restarts:

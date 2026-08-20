@@ -38,9 +38,7 @@ class AutoEtsModel:
 
         try:
             sf = StatsForecast(models=[AutoETS(season_length=1)], freq=1, n_jobs=1)
-            forecast_df = sf.forecast(
-                df=df.to_pandas(), h=horizon, level=[80]
-            )
+            forecast_df = sf.forecast(df=df.to_pandas(), h=horizon, level=[80])
         except Exception:
             logger.exception("AutoETS failed, falling back to naive")
             return NaiveModel().predict(history, horizon)

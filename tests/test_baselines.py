@@ -1,6 +1,11 @@
 import numpy as np
 
-from scalescope.models.baselines import EwmaModel, LinearTrendModel, NaiveModel, SeasonalNaiveModel
+from scalescope.models.baselines import (
+    EwmaModel,
+    LinearTrendModel,
+    NaiveModel,
+    SeasonalNaiveModel,
+)
 
 
 def test_naive_repeats_last_value():
