@@ -13,18 +13,18 @@ const AGING_MAX_S = 20;
 // Raw log panel: cap rows kept in the DOM.
 const LOG_MAX_ROWS = 40;
 
-// Muted blue-grey shades for the non-selected model overlay lines, in the
-// same family as --accent. Kept out of style.css since Chart.js needs raw
-// hex strings rather than CSS custom properties.
+// Muted indigo/neutral shades for the non-selected model overlay lines, in
+// the same family as --accent (#5b5bd6). Kept out of style.css since
+// Chart.js needs raw hex strings rather than CSS custom properties.
 const MODEL_COLORS = {
-  naive: "#7c8491",
-  seasonal_naive: "#5f6672",
-  ewma: "#3b82f6",
-  linear_trend: "#2563eb",
-  auto_ets: "#1d4ed8",
-  lightgbm_quantile: "#1e40af",
+  naive: "#9a9892",
+  seasonal_naive: "#6b6a66",
+  ewma: "#8b8bdf",
+  linear_trend: "#7676d9",
+  auto_ets: "#5b5bd6",
+  lightgbm_quantile: "#4c4cc4",
 };
-const FALLBACK_MODEL_COLOR = "#7c8491";
+const FALLBACK_MODEL_COLOR = "#9a9892";
 
 let currentWorkload = null;
 let selectedModel = DEFAULT_MODEL;
@@ -238,7 +238,7 @@ function updateChart(observations, forecast, allForecasts, modelNames) {
     {
       label: "request rate (observed)",
       data: [...historyValues, ...new Array(forecast.p50.length).fill(null)],
-      borderColor: "#1e40af",
+      borderColor: "#4c4cc4",
       backgroundColor: "transparent",
       borderWidth: 2,
       pointRadius: 0,
@@ -247,7 +247,7 @@ function updateChart(observations, forecast, allForecasts, modelNames) {
     {
       label: `${forecast.model} p50 (selected)`,
       data: anchorLast(forecast.p50),
-      borderColor: "#3b82f6",
+      borderColor: "#5b5bd6",
       backgroundColor: "transparent",
       borderDash: [4, 4],
       borderWidth: 2,
@@ -258,7 +258,7 @@ function updateChart(observations, forecast, allForecasts, modelNames) {
       label: "forecast p90",
       data: anchorLast(forecast.p90),
       borderColor: "transparent",
-      backgroundColor: "rgba(37, 99, 235, 0.1)",
+      backgroundColor: "rgba(91, 91, 214, 0.1)",
       pointRadius: 0,
       fill: "+1",
     },
@@ -266,7 +266,7 @@ function updateChart(observations, forecast, allForecasts, modelNames) {
       label: "forecast p10",
       data: anchorLast(forecast.p10),
       borderColor: "transparent",
-      backgroundColor: "rgba(37, 99, 235, 0.1)",
+      backgroundColor: "rgba(91, 91, 214, 0.1)",
       pointRadius: 0,
       fill: false,
     },
@@ -301,11 +301,11 @@ function updateChart(observations, forecast, allForecasts, modelNames) {
         maintainAspectRatio: false,
         interaction: { mode: "index", intersect: false },
         scales: {
-          x: { ticks: { color: "#5f6672", maxTicksLimit: 12 }, grid: { color: "#e2e8f0" } },
-          y: { ticks: { color: "#5f6672" }, grid: { color: "#e2e8f0" }, beginAtZero: true },
+          x: { ticks: { color: "#6b6a66", maxTicksLimit: 12 }, grid: { color: "#e8e6e1" } },
+          y: { ticks: { color: "#6b6a66" }, grid: { color: "#e8e6e1" }, beginAtZero: true },
         },
         plugins: {
-          legend: { labels: { color: "#111827" } },
+          legend: { labels: { color: "#1c1c1f" } },
         },
       },
     });

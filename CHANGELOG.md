@@ -4,6 +4,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.5.1]
+
+### Changed
+
+- Full dashboard visual redesign toward a "modern clean SaaS" look
+  (previous style was explicitly rejected as too flat/analyst-tool). Grounded
+  in real production CSS pulled from Linear and Vercel: restrained 4-8px
+  border radii (previously 0 everywhere), pill shapes reserved for
+  badges/tags only. Warm off-white background and a single indigo accent
+  (`#5b5bd6`) replacing the previous cool navy/white scheme. Soft low-opacity
+  shadows alongside thin borders instead of flat border-only panels. Real
+  Inter/JetBrains Mono loaded via Google Fonts (previously referenced in CSS
+  but never actually loaded - silently fell back to system fonts). Added a
+  persistent left sidebar for identity/workload-selection/load-trigger
+  controls, main content area for evidence/metrics/tables/chart/log.
+  No functional or API changes - all existing panels, the model comparison
+  table, multi-model chart overlay, raw log, and the load-trigger buttons
+  from 0.5.0 are unchanged in behavior, confirmed live after rebuild.
+
 ## [0.5.0]
 
 ### Added

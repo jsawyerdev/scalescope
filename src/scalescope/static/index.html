@@ -4,152 +4,160 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ScaleScope</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-<header>
+<div class="shell">
+
+<aside class="sidebar">
   <div class="brand">
     <h1>ScaleScope</h1>
     <span class="subtitle">predictive capacity intelligence</span>
   </div>
+
   <label class="field">
     <span class="field-label">workload</span>
     <select id="workload-select"></select>
   </label>
-</header>
 
-<section class="panel source-panel">
-  <div class="source-row">
-    <div class="evidence-item">
+  <div class="side-panel">
+    <div class="side-panel-title">source</div>
+    <div class="side-item">
       <span class="field-label">mode</span>
       <span id="mode-badge" class="badge mode">&mdash;</span>
     </div>
-    <div class="evidence-item source-target">
+    <div class="side-item">
       <span class="field-label">observing</span>
       <span id="source-target-text" class="mono">&mdash;</span>
     </div>
-    <div class="evidence-item">
+    <div class="side-item">
       <span class="field-label">connection</span>
       <div class="freshness-line">
         <span id="source-conn-dot" class="dot"></span>
         <span id="source-conn-text">&mdash;</span>
       </div>
     </div>
+    <div id="source-error" class="fetch-error" hidden></div>
   </div>
-  <div id="source-error" class="fetch-error" hidden></div>
-</section>
 
-<section class="panel trigger-panel">
-  <div class="panel-header">
-    <h2>Generate load</h2>
-    <span class="panel-note">forces a pattern on the live workload now, so its effect on the metrics/diagnosis below is visible within a few ticks</span>
-  </div>
-  <div class="trigger-row">
-    <button class="trigger-btn" data-kind="cpu">CPU spike</button>
-    <button class="trigger-btn" data-kind="memory">Memory leak</button>
-    <button class="trigger-btn" data-kind="traffic">Traffic spike</button>
+  <div class="side-panel">
+    <div class="side-panel-title">generate load</div>
+    <p class="panel-note">forces a pattern on the live workload now, so its effect on the metrics/diagnosis is visible within a few ticks</p>
+    <div class="trigger-row">
+      <button class="trigger-btn" data-kind="cpu">CPU spike</button>
+      <button class="trigger-btn" data-kind="memory">Memory leak</button>
+      <button class="trigger-btn" data-kind="traffic">Traffic spike</button>
+    </div>
     <span id="trigger-status" class="trigger-status">&mdash;</span>
   </div>
-</section>
 
-<section class="panel evidence-panel">
-  <div class="evidence-row">
-    <div class="evidence-item">
-      <span class="field-label">diagnosis</span>
-      <div class="diagnosis-line">
-        <span id="diagnosis-badge" class="badge">&mdash;</span>
-        <span id="diagnosis-text" class="explanation">waiting for data&hellip;</span>
+  <div class="sidebar-footer">
+    <span id="version-text">&mdash;</span>
+  </div>
+</aside>
+
+<main class="content">
+
+  <section class="panel evidence-panel">
+    <div class="evidence-row">
+      <div class="evidence-item">
+        <span class="field-label">diagnosis</span>
+        <div class="diagnosis-line">
+          <span id="diagnosis-badge" class="badge">&mdash;</span>
+          <span id="diagnosis-text" class="explanation">waiting for data&hellip;</span>
+        </div>
+      </div>
+      <div class="evidence-item">
+        <span class="field-label">data freshness</span>
+        <div class="freshness-line">
+          <span id="freshness-dot" class="dot"></span>
+          <span id="freshness-text">&mdash;</span>
+        </div>
+      </div>
+      <div class="evidence-item">
+        <span class="field-label">workload</span>
+        <span id="source-text" class="mono">&mdash;</span>
       </div>
     </div>
-    <div class="evidence-item">
-      <span class="field-label">data freshness</span>
-      <div class="freshness-line">
-        <span id="freshness-dot" class="dot"></span>
-        <span id="freshness-text">&mdash;</span>
-      </div>
+    <div id="fetch-error" class="fetch-error" hidden></div>
+  </section>
+
+  <section class="metrics-section">
+    <div class="section-label">observed &mdash; latest tick</div>
+    <div class="metrics" id="metrics-strip">
+      <div class="stat"><span class="label">replicas</span><span class="value" id="stat-replicas">&mdash;</span></div>
+      <div class="stat"><span class="label">request rate</span><span class="value" id="stat-request-rate">&mdash;</span></div>
+      <div class="stat"><span class="label">cpu</span><span class="value" id="stat-cpu">&mdash;</span></div>
+      <div class="stat"><span class="label">cpu throttled</span><span class="value" id="stat-cpu-throttled">&mdash;</span></div>
+      <div class="stat"><span class="label">memory</span><span class="value" id="stat-memory">&mdash;</span></div>
+      <div class="stat"><span class="label">p95 latency</span><span class="value" id="stat-latency">&mdash;</span></div>
+      <div class="stat"><span class="label">error rate</span><span class="value" id="stat-error-rate">&mdash;</span></div>
+      <div class="stat"><span class="label">pending pods</span><span class="value" id="stat-pending">&mdash;</span></div>
+      <div class="stat"><span class="label">restarts</span><span class="value" id="stat-restarts">&mdash;</span></div>
     </div>
-    <div class="evidence-item">
-      <span class="field-label">workload</span>
-      <span id="source-text" class="mono">&mdash;</span>
+  </section>
+
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Model comparison</h2>
+      <span class="panel-note">every registered model, evaluated against the same evidence &mdash; select a row to inspect its forecast below</span>
     </div>
-  </div>
-  <div id="fetch-error" class="fetch-error" hidden></div>
-</section>
+    <div class="table-wrap">
+      <table id="model-table">
+        <thead>
+          <tr>
+            <th>model</th>
+            <th class="num">recommended</th>
+            <th class="num">&Delta; vs current</th>
+            <th>confidence</th>
+            <th class="num">peak forecast (p90)</th>
+            <th class="num">projected utilization</th>
+          </tr>
+        </thead>
+        <tbody id="model-table-body"></tbody>
+      </table>
+    </div>
+  </section>
 
-<section class="metrics-section">
-  <div class="section-label">observed &mdash; latest tick</div>
-  <div class="metrics" id="metrics-strip">
-    <div class="stat"><span class="label">replicas</span><span class="value" id="stat-replicas">&mdash;</span></div>
-    <div class="stat"><span class="label">request rate</span><span class="value" id="stat-request-rate">&mdash;</span></div>
-    <div class="stat"><span class="label">cpu</span><span class="value" id="stat-cpu">&mdash;</span></div>
-    <div class="stat"><span class="label">cpu throttled</span><span class="value" id="stat-cpu-throttled">&mdash;</span></div>
-    <div class="stat"><span class="label">memory</span><span class="value" id="stat-memory">&mdash;</span></div>
-    <div class="stat"><span class="label">p95 latency</span><span class="value" id="stat-latency">&mdash;</span></div>
-    <div class="stat"><span class="label">error rate</span><span class="value" id="stat-error-rate">&mdash;</span></div>
-    <div class="stat"><span class="label">pending pods</span><span class="value" id="stat-pending">&mdash;</span></div>
-    <div class="stat"><span class="label">restarts</span><span class="value" id="stat-restarts">&mdash;</span></div>
-  </div>
-</section>
+  <section class="panel chart-panel">
+    <div class="panel-header">
+      <h2>Forecast &mdash; <span id="chart-model-name">&mdash;</span></h2>
+      <span class="panel-note">solid line = observed request rate; dashed = selected model's forecast p50 with shaded p10&ndash;p90 band; thin lines = every other registered model's p50, for trajectory comparison</span>
+    </div>
+    <div class="chart-wrap"><canvas id="request-rate-chart"></canvas></div>
+  </section>
 
-<section class="panel">
-  <div class="panel-header">
-    <h2>Model comparison</h2>
-    <span class="panel-note">every registered model, evaluated against the same evidence &mdash; select a row to inspect its forecast below</span>
-  </div>
-  <div class="table-wrap">
-    <table id="model-table">
-      <thead>
-        <tr>
-          <th>model</th>
-          <th class="num">recommended</th>
-          <th class="num">&Delta; vs current</th>
-          <th>confidence</th>
-          <th class="num">peak forecast (p90)</th>
-          <th class="num">projected utilization</th>
-        </tr>
-      </thead>
-      <tbody id="model-table-body"></tbody>
-    </table>
-  </div>
-</section>
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Raw observations</h2>
+      <span class="panel-note">last 40 simulator ticks, newest first &mdash; unprocessed values as written to storage</span>
+    </div>
+    <div class="table-wrap log-wrap">
+      <table id="log-table" class="mono">
+        <thead>
+          <tr>
+            <th>ts</th>
+            <th class="num">replicas</th>
+            <th class="num">req/s</th>
+            <th class="num">cpu%</th>
+            <th class="num">throttled%</th>
+            <th class="num">p95 ms</th>
+            <th class="num">error%</th>
+            <th class="num">pending</th>
+            <th class="num">restarts</th>
+          </tr>
+        </thead>
+        <tbody id="log-body"></tbody>
+      </table>
+    </div>
+  </section>
 
-<section class="panel chart-panel">
-  <div class="panel-header">
-    <h2>Forecast &mdash; <span id="chart-model-name">&mdash;</span></h2>
-    <span class="panel-note">solid line = observed request rate; dashed = selected model's forecast p50 with shaded p10&ndash;p90 band; thin lines = every other registered model's p50, for trajectory comparison</span>
-  </div>
-  <div class="chart-wrap"><canvas id="request-rate-chart"></canvas></div>
-</section>
-
-<section class="panel">
-  <div class="panel-header">
-    <h2>Raw observations</h2>
-    <span class="panel-note">last 40 simulator ticks, newest first &mdash; unprocessed values as written to storage</span>
-  </div>
-  <div class="table-wrap log-wrap">
-    <table id="log-table" class="mono">
-      <thead>
-        <tr>
-          <th>ts</th>
-          <th class="num">replicas</th>
-          <th class="num">req/s</th>
-          <th class="num">cpu%</th>
-          <th class="num">throttled%</th>
-          <th class="num">p95 ms</th>
-          <th class="num">error%</th>
-          <th class="num">pending</th>
-          <th class="num">restarts</th>
-        </tr>
-      </thead>
-      <tbody id="log-body"></tbody>
-    </table>
-  </div>
-</section>
-
-<footer>
-  <span id="version-text">&mdash;</span>
-</footer>
+</main>
+</div>
 
 <script src="app.js"></script>
 </body>
