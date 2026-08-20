@@ -4,6 +4,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.6.1]
+
+### Documentation
+
+- README deep dive: four new Mermaid diagrams derived directly from the
+  code they document, not from a description of it — `diagnosis.py`'s
+  full rule ladder as a flowchart (exact branch order, including which
+  checks require a 10-row window and which don't), the replay lab's
+  anchor/backtest loop, the actuation sequence from `main.py`'s
+  `_observe_loop`/`_actuate` through `k8s_actuator.scale`'s HPA-conflict
+  check, and the `/trigger` DEMO-vs-OBSERVE branch. Plus a small sequence
+  diagram of the dashboard's own fetch cadence (3s main poll, 12s
+  other-model refetch, on-demand replay/trigger). New "Diagnosis logic"
+  and "Replay lab" top-level sections; no code changes.
+
 ## [0.6.0]
 
 ### Added

@@ -115,6 +115,79 @@ history and returns all six recommendations side by side, so the dashboard can c
 of committing to one model's output blind. `GET /api/workloads/{name}/recommendation` (singular)
 still exists for a single `model=` choice.
 
+## Diagnosis logic
+
+`diagnosis.py`'s rule ladder, in the exact order `diagnose()` evaluates it. Every
+branch that returns `scaling_will_help=false` is a case where adding replicas
+would not fix — or would actively mask — the real problem:
+
+```mermaid
+flowchart TD
+    START(["diagnose(observations)"]) --> EMPTY{"observations<br/>empty?"}
+    EMPTY -->|yes| R1["HEALTHY<br/>'no data yet'"]
+    EMPTY -->|no| PENDING{"latest.pending_pods<br/>&ge; 1 ?"}
+
+    PENDING -->|yes| R2["NODE_CAPACITY_BOTTLENECK<br/>scaling_will_help = false<br/>cluster itself is out of room"]
+    PENDING -->|no| THROTTLE{"latest.cpu_throttled_pct<br/>&ge; 5.0 ?"}
+
+    THROTTLE -->|yes| R3["CPU_LIMIT_CONSTRAINT<br/>scaling_will_help = false<br/>containers hitting their CPU limit"]
+    THROTTLE -->|no| WIN1{"last 30 rows<br/>&ge; 10 ?"}
+
+    WIN1 -->|yes| MEMCHECK{"memory slope &ge; 0.3 MB/tick<br/>AND traffic change &lt; 5% ?"}
+    WIN1 -->|no| CEILING
+    MEMCHECK -->|yes| R4["POSSIBLE_MEMORY_LEAK<br/>scaling_will_help = false<br/>memory grows while traffic is flat"]
+    MEMCHECK -->|no| CEILING{"replicas &ge; max_replicas<br/>AND cpu_usage_pct &ge; 80% ?"}
+
+    CEILING -->|yes| R5["HPA_CEILING<br/>scaling_will_help = false<br/>at the configured ceiling, still under pressure"]
+    CEILING -->|no| WIN2{"last 30 rows<br/>&ge; 10 ?"}
+
+    WIN2 -->|yes| NONCPU{"traffic +15%<br/>AND latency +15%<br/>AND cpu &lt; 80% ?"}
+    WIN2 -->|no| R6
+
+    NONCPU -->|yes| R7["LIKELY_NON_CPU_BOTTLENECK<br/>scaling_will_help = true<br/>traffic/latency up, CPU isn't — investigate downstream"]
+    NONCPU -->|no| R6["HEALTHY<br/>scaling_will_help = true<br/>no constraint detected"]
+```
+
+Node capacity and CPU-limit checks run on the single latest row (no window
+needed); the memory-leak and non-CPU-bottleneck checks need at least 10 rows
+of the last-30-row window to compute a slope/delta, so they're skipped (not
+failed) below that. `diagnose()` never calls a model — it is deliberately
+readable and reviewable independent of any forecast.
+
+## Replay lab
+
+`GET /api/workloads/{name}/replay` (`src/scalescope/replay.py`) answers
+"which model actually performs best on this workload's real data," measured,
+not asserted — the same "don't take a stated preference on faith" discipline
+`diagnosis.py` applies to scaling decisions, applied to model selection:
+
+```mermaid
+flowchart TD
+    A["GET /replay"] --> B["load up to 5000 recent<br/>observations for the workload"]
+    B --> C["_anchors(history_len, min_history=8,<br/>horizon=30, num_anchors=5)<br/>evenly-spaced past cutoff points"]
+    C --> D{"any anchors fit?"}
+    D -->|"no (too little history)"| E["scores = [ ]"]
+    D -->|yes| F["for each of the 6 registered models"]
+    F --> G["for each anchor point"]
+    G --> H["train = history strictly before the anchor<br/>actual = the horizon of real values right after it"]
+    H --> I["forecast = model.predict(train, horizon=30)<br/>(each model's own &lt; min-history fallback<br/>to naive still applies here)"]
+    I --> J["error = mean(|actual − forecast.p50|)"]
+    J --> G
+    G --> K["average MAE / MAPE across<br/>this model's anchors"]
+    K --> F
+    F --> L["sort all models by MAE, ascending"]
+    L --> M["JSON response — the dashboard's<br/>'Run replay' button calls this on demand"]
+```
+
+Deliberately scoped: this backtests a model's forecast against what the
+workload's own metrics actually did next, not against what a real
+Kubernetes HPA would have decided over the same window — see "Not yet
+built" below. It also runs on demand rather than the dashboard's 3s poll
+cycle: retraining all 6 models (LightGBM included) across 5 anchor points
+takes roughly 2-10 seconds depending on history size and CPU contention,
+confirmed live against both a DEMO instance (5000 synthetic rows, ~2s) and
+an OBSERVE instance reading a real cluster (~10s).
+
 ## Run it
 
 ```
@@ -152,6 +225,31 @@ package set to `requirements-lock.txt` and leaves the service(s) running
   kubeconfig from `generate-observer-kubeconfig.sh` (see below).
 - `./scripts/rebuild.sh --wipe-data` — also drops the DuckDB volume(s), for
   a clean-slate rebuild instead of preserving history across it.
+
+### What the dashboard fetches, and when
+
+`static/app.js`'s `refresh()` runs every `POLL_INTERVAL_MS` (3s); the
+5 non-selected models' forecasts are only refetched every 12s to avoid
+firing 6 forecast requests on every 3s tick. Replay and load triggers are
+explicit button actions, never polled:
+
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant API as FastAPI /api/*
+
+    loop every 3s
+        Browser->>API: GET /observations, /recommendations,<br/>/forecast?model=selected, /source
+        API-->>Browser: JSON
+    end
+    loop every 12s
+        Browser->>API: GET /forecast?model=X for each<br/>non-selected model
+        API-->>Browser: JSON
+    end
+    Note over Browser,API: on button click only — not polled
+    Browser->>API: POST /trigger?kind=...
+    Browser->>API: GET /replay
+```
 
 ## Wiring in a real cluster (OBSERVE mode)
 
@@ -216,6 +314,49 @@ or an API error, so "why didn't it scale" is never a silent question) -
 the dashboard sidebar shows this as an "actuation" row whenever
 `actuate=true` in observe mode.
 
+Exact sequence, once per tick, straight from `main.py`'s `_observe_loop` /
+`_actuate` and `k8s_actuator.py`'s `scale`:
+
+```mermaid
+sequenceDiagram
+    participant Loop as _observe_loop (every tick)
+    participant K8s as Kubernetes API
+    participant Store as DuckDB
+    participant Diag as diagnose()
+    participant Model as AutoEtsModel
+    participant Cap as recommend_replicas()
+    participant Act as k8s_actuator.scale()
+
+    Loop->>K8s: collect() — read replicas/CPU/memory
+    Loop->>Store: insert_observation(row)
+    Note over Loop: only if SCALESCOPE_ACTUATE=true
+    Loop->>Store: recent_observations(last 600 rows)
+    Loop->>Diag: diagnose(last 30 rows)
+    alt scaling_will_help == false
+        Diag-->>Loop: source.last_actuation_error = "skipped: <explanation>"
+    else scaling_will_help == true
+        Loop->>Model: predict(request_rate, horizon=30)
+        Model-->>Loop: Forecast(p10, p50, p90)
+        Loop->>Cap: recommend_replicas(current, forecast, peak_step=15)
+        Cap-->>Loop: recommended_replicas
+        alt recommended == current
+            Note over Loop: no-op, nothing written
+        else recommended != current
+            Loop->>Act: scale(deployment, recommended)
+            Act->>K8s: list HorizontalPodAutoscalers in namespace
+            alt a competing HPA targets this Deployment
+                Act-->>Loop: raise HpaConflictError
+                Loop->>Loop: source.last_actuation_error = "...refusing to write"
+            else no competing HPA
+                Act->>K8s: patch deployments/scale — spec.replicas = recommended
+                K8s-->>Act: 200 OK
+                Act-->>Loop: success
+                Loop->>Loop: source.last_actuation_ts / last_actuation_replicas updated
+            end
+        end
+    end
+```
+
 ### sample-workload/
 
 A self-contained FastAPI test target with no external load generator
@@ -226,6 +367,43 @@ to react to. Exposes `sample_workload_demand_rps`/`latency_p95_ms`/
 `error_rate` Prometheus gauges — point `SCALESCOPE_K8S_METRICS_URL` at its
 `/metrics` endpoint to get real values for those fields instead of `0.0`.
 See `sample-workload/README.md` for build/push/deploy instructions.
+
+## On-demand load triggers
+
+The dashboard's "Generate load" buttons call `POST /api/workloads/{name}/trigger`,
+which forces a pattern immediately instead of waiting for it to occur
+naturally, so its effect on the metrics and diagnosis is visible within a
+few ticks. The route branches on `SCALESCOPE_MODE` (from `api/routes.py`'s
+`trigger_fault`):
+
+```mermaid
+sequenceDiagram
+    participant UI as dashboard button
+    participant API as POST /trigger
+    participant Sim as WorkloadSimulator (DEMO)
+    participant WL as sample-workload's own<br/>POST /trigger (OBSERVE)
+
+    UI->>API: kind={cpu|memory|traffic}, duration_seconds=45
+    alt SCALESCOPE_MODE=demo
+        API->>Sim: trigger_fault(fault, duration_ticks)
+        Sim-->>API: fault now active
+        API-->>UI: 200 {target: "demo simulator"}
+    else SCALESCOPE_MODE=observe
+        API->>WL: POST base_url/trigger?kind&duration_seconds<br/>(httpx, 5s timeout)
+        alt workload unreachable / SCALESCOPE_K8S_METRICS_URL unset
+            WL--xAPI: httpx.HTTPError, or 501 if unconfigured
+            API-->>UI: 502/501 with the reason
+        else reachable
+            WL-->>API: 200 + fault state
+            API-->>UI: 200 {target: base_url, ...}
+        end
+    end
+    UI->>UI: local countdown timer for duration_seconds
+```
+
+`base_url` is derived from `SCALESCOPE_K8S_METRICS_URL` (its `/metrics`
+suffix stripped) — ScaleScope has no other route to the workload's process,
+so OBSERVE-mode triggers require that variable to be set.
 
 ## API
 
