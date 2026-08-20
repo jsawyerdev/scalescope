@@ -25,6 +25,12 @@ class Settings:
     # Opt-in on top of mode=observe: observing a cluster must never imply
     # writing to it by default.
     actuate: bool = os.environ.get("SCALESCOPE_ACTUATE", "false").lower() == "true"
+    # Both unset -> no auth (default, e.g. local zero-config DEMO). Both set
+    # -> HTTP Basic Auth required for every request except /healthz. main.py
+    # refuses to start with actuate=true and no credentials configured -
+    # unauthenticated write access to a real cluster has no safe default.
+    auth_username: str | None = os.environ.get("SCALESCOPE_AUTH_USERNAME")
+    auth_password: str | None = os.environ.get("SCALESCOPE_AUTH_PASSWORD")
 
 
 settings = Settings()

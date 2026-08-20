@@ -27,7 +27,7 @@
   <div class="side-panel">
     <div class="side-panel-title">source</div>
     <div class="side-item">
-      <span class="field-label">mode</span>
+      <span class="field-label hint" title="DEMO: synthetic simulator, no cluster connection. OBSERVE: reading a real Kubernetes Deployment's replicas/CPU/memory.">mode</span>
       <span id="mode-badge" class="badge mode">&mdash;</span>
     </div>
     <div class="side-item">
@@ -42,7 +42,7 @@
       </div>
     </div>
     <div class="side-item" id="actuation-item" hidden>
-      <span class="field-label">actuation</span>
+      <span class="field-label hint" title="Only shown when SCALESCOPE_ACTUATE=true. ScaleScope writes recommended replica counts directly to the cluster, but refuses if a real HorizontalPodAutoscaler already targets the same Deployment (two controllers writing the same value would fight each other).">actuation</span>
       <div class="freshness-line">
         <span id="actuation-dot" class="dot"></span>
         <span id="actuation-text">&mdash;</span>
@@ -72,14 +72,14 @@
   <section class="panel evidence-panel">
     <div class="evidence-row">
       <div class="evidence-item">
-        <span class="field-label">diagnosis</span>
+        <span class="field-label hint" title="Deterministic rule engine, never calls a model. Flags when adding replicas would not fix (or would mask) the real problem: CPU limit throttling, memory leak, node capacity exhaustion, HPA ceiling, or a non-CPU bottleneck.">diagnosis</span>
         <div class="diagnosis-line">
           <span id="diagnosis-badge" class="badge">&mdash;</span>
           <span id="diagnosis-text" class="explanation">waiting for data&hellip;</span>
         </div>
       </div>
       <div class="evidence-item">
-        <span class="field-label">data freshness</span>
+        <span class="field-label hint" title="Time since the latest observation. Green = fresh, amber = aging, red = stale — a stale reading means the data below may not reflect what's happening right now.">data freshness</span>
         <div class="freshness-line">
           <span id="freshness-dot" class="dot"></span>
           <span id="freshness-text">&mdash;</span>
@@ -117,12 +117,12 @@
       <table id="model-table">
         <thead>
           <tr>
-            <th>model</th>
-            <th class="num">recommended</th>
-            <th class="num">&Delta; vs current</th>
-            <th>confidence</th>
-            <th class="num">peak forecast (p90)</th>
-            <th class="num">projected utilization</th>
+            <th class="hint" title="6 forecast models sharing the same request-rate history: naive/seasonal_naive/ewma/linear_trend baselines, auto_ets (statistical), lightgbm_quantile (ML). Click a row to inspect its forecast below.">model</th>
+            <th class="num hint" title="Replica count this model recommends right now, sized to its p90 (worst-case-leaning) demand forecast at 70% target utilization.">recommended</th>
+            <th class="num hint" title="Change from the replica count currently observed.">&Delta; vs current</th>
+            <th class="hint" title="Derived from forecast band width (p90 minus p10) relative to peak demand — a wide uncertainty band lowers confidence, it is not a statistical guarantee.">confidence</th>
+            <th class="num hint" title="This model's highest predicted request rate within the lookahead window, at the 90th percentile.">peak forecast (p90)</th>
+            <th class="num hint" title="Expected load per pod at the recommended replica count, relative to the 70% target.">projected utilization</th>
           </tr>
         </thead>
         <tbody id="model-table-body"></tbody>
@@ -140,10 +140,10 @@
       <table id="replay-table">
         <thead>
           <tr>
-            <th>model</th>
-            <th class="num">anchors</th>
-            <th class="num">mean absolute error</th>
-            <th class="num">mean absolute % error</th>
+            <th class="hint" title="Sorted best-first by mean absolute error, measured against this workload's own recorded history.">model</th>
+            <th class="num hint" title="Number of past points backtested — each anchor trains only on data strictly before it, then compares the forecast to what actually happened next.">anchors</th>
+            <th class="num hint" title="Average |actual − forecast| across all backtest anchors, in the same units as request rate. Lower is better.">mean absolute error</th>
+            <th class="num hint" title="Same error expressed as a percentage of the actual value — easier to compare across workloads with different traffic scale. Lower is better.">mean absolute % error</th>
           </tr>
         </thead>
         <tbody id="replay-table-body"></tbody>

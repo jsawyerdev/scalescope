@@ -4,6 +4,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.7.0]
+
+### Added
+
+- **Authentication**: `SCALESCOPE_AUTH_USERNAME`/`SCALESCOPE_AUTH_PASSWORD`
+  gate every route (API and dashboard) behind HTTP Basic Auth, except
+  `/healthz` (new, unauthenticated liveness check — the Docker
+  `HEALTHCHECK` was moved to it). Closes a gap flagged but not fixed in
+  an earlier assurance review this session: every ScaleScope endpoint,
+  including the write-capable actuation path, had zero authentication.
+  Both env vars unset -> no auth (unchanged default for local demo use).
+  `main.py` now refuses to start if `SCALESCOPE_ACTUATE=true` without
+  both configured — unauthenticated write access to a real cluster has
+  no safe default. `docker-compose.yml`/`.env.example` updated;
+  `scripts/rebuild.sh`'s own smoke-test curls authenticate when
+  configured, polling the new `/healthz` for readiness instead of a
+  data endpoint.
+- Dashboard: hover explainers (native `title` tooltips, no layout
+  change) on diagnosis, data freshness, mode, actuation, and every
+  model-comparison/replay-lab column and model name — the jargon a
+  first-time viewer would otherwise have no context for.
+
 ## [0.6.2]
 
 ### Fixed

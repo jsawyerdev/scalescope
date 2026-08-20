@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from scalescope.api.routes import router
+from scalescope.auth import BasicAuthMiddleware
 from scalescope.capacity import STARTUP_LEAD_STEPS, recommend_replicas
 from scalescope.config import settings
 from scalescope.diagnosis import diagnose
@@ -170,8 +171,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     store.close()
 
 
+if settings.actuate and not (settings.auth_username and settings.auth_password):
+    raise RuntimeError(
+        "SCALESCOPE_ACTUATE=true requires SCALESCOPE_AUTH_USERNAME and "
+        "SCALESCOPE_AUTH_PASSWORD to be set - unauthenticated write access "
+        "to a real cluster has no safe default"
+    )
+
 app = FastAPI(title="ScaleScope", lifespan=lifespan)
+
+
+@app.get("/healthz")
+def healthz() -> dict[str, str]:
+    """Unauthenticated liveness check - the only route BasicAuthMiddleware exempts."""
+    return {"status": "ok"}
+
+
 app.include_router(router)
 
 static_dir = Path(__file__).parent / "static"
 app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+
+if settings.auth_username and settings.auth_password:
+    app.add_middleware(
+        BasicAuthMiddleware,
+        username=settings.auth_username,
+        password=settings.auth_password,
+    )
+    logger.info("HTTP Basic Auth enabled for all routes except /healthz")
+else:
+    logger.warning(
+        "no SCALESCOPE_AUTH_USERNAME/SCALESCOPE_AUTH_PASSWORD configured - "
+        "running with no authentication"
+    )

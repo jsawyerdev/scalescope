@@ -44,6 +44,24 @@ DEMO_URL="http://localhost:8000"
 OBSERVE_URL="http://localhost:8001"
 KUBECONFIG_PATH="${SCALESCOPE_OBSERVER_KUBECONFIG:-./scalescope-observer.kubeconfig}"
 
+# Read directly from .env (not exported into this shell) so the smoke-test
+# curls below can authenticate if SCALESCOPE_AUTH_USERNAME/PASSWORD are set.
+AUTH_USERNAME=""
+AUTH_PASSWORD=""
+ENV_FILE="$ROOT_DIR/.env"
+if [ -f "$ENV_FILE" ]; then
+    AUTH_USERNAME="$(grep -m1 '^SCALESCOPE_AUTH_USERNAME=' "$ENV_FILE" | cut -d= -f2-)"
+    AUTH_PASSWORD="$(grep -m1 '^SCALESCOPE_AUTH_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)"
+fi
+
+curl_auth() {
+    if [ -n "$AUTH_USERNAME" ] && [ -n "$AUTH_PASSWORD" ]; then
+        curl -u "$AUTH_USERNAME:$AUTH_PASSWORD" "$@"
+    else
+        curl "$@"
+    fi
+}
+
 if [ "$WITH_OBSERVE" -eq 1 ]; then
     if [ ! -f "$KUBECONFIG_PATH" ]; then
         echo "ERROR: --observe requires a kubeconfig at $KUBECONFIG_PATH" >&2
@@ -109,21 +127,21 @@ on_failure() {
 trap on_failure ERR
 
 for _ in $(seq 1 30); do
-    if curl -sf "$DEMO_URL/api/workloads" >/dev/null 2>&1; then
+    if curl -sf "$DEMO_URL/healthz" >/dev/null 2>&1; then
         break
     fi
     sleep 1
 done
-curl -sf "$DEMO_URL/api/workloads" | grep -q payments-api
+curl_auth -sf "$DEMO_URL/api/workloads" | grep -q payments-api
 
 if [ "$WITH_OBSERVE" -eq 1 ]; then
     for _ in $(seq 1 30); do
-        if curl -sf "$OBSERVE_URL/api/source" >/dev/null 2>&1; then
+        if curl -sf "$OBSERVE_URL/healthz" >/dev/null 2>&1; then
             break
         fi
         sleep 1
     done
-    curl -sf "$OBSERVE_URL/api/source" | grep -q '"connected":true'
+    curl_auth -sf "$OBSERVE_URL/api/source" | grep -q '"connected":true'
 fi
 trap - ERR
 

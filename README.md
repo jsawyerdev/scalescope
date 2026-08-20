@@ -6,7 +6,7 @@ runs that alongside a deterministic diagnosis engine that flags when scaling is
 the wrong response (CPU limit throttling, memory leak, node capacity exhaustion,
 HPA ceiling, non-CPU bottleneck).
 
-## Status: v0.6 (demo + observe + opt-in actuation + on-demand load triggers + replay lab, verified against a real cluster)
+## Status: v0.7 (demo + observe + opt-in actuation + on-demand load triggers + replay lab + optional auth, verified against a real cluster)
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed at each version.
 
@@ -213,6 +213,8 @@ Environment variables (see `src/scalescope/config.py`):
 | `SCALESCOPE_K8S_KUBECONFIG` | unset | Kubeconfig path; unset tries in-cluster config, then default kubeconfig discovery |
 | `SCALESCOPE_K8S_METRICS_URL` | unset | Workload's own `/metrics` URL, for real `request_rate`/`latency_p95_ms`/`error_rate` |
 | `SCALESCOPE_ACTUATE` | `false` | Observe mode only: actually write recommended replica counts to the cluster (see "Actuation" below) |
+| `SCALESCOPE_AUTH_USERNAME` | unset | HTTP Basic Auth username for every route (see "Authentication" below) |
+| `SCALESCOPE_AUTH_PASSWORD` | unset | HTTP Basic Auth password; both must be set together |
 
 To fully tear down and rebuild against the latest dependency versions
 `pyproject.toml` allows, run `./scripts/rebuild.sh`. It records the resolved
@@ -225,6 +227,29 @@ package set to `requirements-lock.txt` and leaves the service(s) running
   kubeconfig from `generate-observer-kubeconfig.sh` (see below).
 - `./scripts/rebuild.sh --wipe-data` — also drops the DuckDB volume(s), for
   a clean-slate rebuild instead of preserving history across it.
+
+### Authentication
+
+Both `SCALESCOPE_AUTH_USERNAME` and `SCALESCOPE_AUTH_PASSWORD` unset (the
+default): no authentication — every route, including the dashboard itself,
+is open. Fine for a local single-operator demo; not fine once
+`SCALESCOPE_ACTUATE=true` gives an unauthenticated surface write access to
+a real Deployment's replica count. Set both to enable HTTP Basic Auth
+(`src/scalescope/auth.py`, applied as ASGI middleware so it covers the
+static dashboard files as well as `/api/*`, not just the API):
+
+- `main.py` refuses to start if `SCALESCOPE_ACTUATE=true` without both
+  set — there is no safe default for that combination.
+- `GET /healthz` is the one exempt route (unauthenticated liveness check;
+  the Docker `HEALTHCHECK` uses it).
+- Browsers handle the login prompt natively — no dashboard login form was
+  built. The first page load triggers the browser's built-in Basic Auth
+  dialog; credentials are then cached by the browser and attached to every
+  subsequent `fetch()` call automatically.
+- `docker-compose.yml` passes `SCALESCOPE_AUTH_USERNAME`/`_PASSWORD`
+  through from `.env` to both services if set there (see
+  `.env.example`). `scripts/rebuild.sh`'s own smoke-test curls read the
+  same `.env` file directly and authenticate if configured.
 
 ### What the dashboard fetches, and when
 
@@ -407,6 +432,8 @@ so OBSERVE-mode triggers require that variable to be set.
 
 ## API
 
+- `GET /healthz` — unauthenticated liveness check, the only exempt route
+  when Basic Auth is enabled (see "Authentication" above)
 - `GET /api/workloads`
 - `GET /api/workloads/{name}/observations?limit=300`
 - `GET /api/workloads/{name}/forecast?model={naive|seasonal_naive|ewma|linear_trend|auto_ets|lightgbm_quantile}`

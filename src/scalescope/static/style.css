@@ -106,6 +106,13 @@ h1 {
   letter-spacing: 0.06em;
 }
 
+/* Hover affordance for elements with a native title-attribute explainer —
+   no layout change, just a hint that hovering reveals more context. */
+.hint {
+  cursor: help;
+  border-bottom: 1px dotted var(--text-faint);
+}
+
 select {
   background: rgba(255, 255, 255, 0.06);
   color: var(--sidebar-text-active);

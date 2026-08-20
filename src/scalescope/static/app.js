@@ -26,6 +26,17 @@ const MODEL_COLORS = {
 };
 const FALLBACK_MODEL_COLOR = "#8a97a8";
 
+// Short fit description per model, shown as a hover tooltip on its name —
+// mirrors README.md's "Forecast models" table.
+const MODEL_DESCRIPTIONS = {
+  naive: "Repeats the last observed value flat. No minimum history. Good on flat stretches, poor on trends or seasonality.",
+  seasonal_naive: "Repeats the value from 150 ticks ago (half the daily cycle). Needs 158+ ticks of history; falls back to naive below that.",
+  ewma: "Exponentially weighted average of the whole history, extrapolated flat. Smooths noise; always flattens, so it misses trend and seasonality.",
+  linear_trend: "Least-squares line over the last 60 points. Captures short local trends; can't turn over for a full cycle.",
+  auto_ets: "Nixtla StatsForecast AutoETS, general-purpose statistical fit with an 80% interval. Needs 30+ ticks; falls back to naive below that or if the fit fails.",
+  lightgbm_quantile: "Three LightGBM quantile regressors (p10/p50/p90) over lag and rolling-stat features. Needs 60+ ticks; falls back to naive below that or if fitting fails.",
+};
+
 let currentWorkload = null;
 let selectedModel = DEFAULT_MODEL;
 let chart = null;
@@ -187,10 +198,15 @@ function deltaCell(recommended, current) {
 function confidenceCell(confidence) {
   const pct = Math.round(confidence * 100);
   return `
-    <div class="confidence-cell">
+    <div class="confidence-cell hint" title="Derived from forecast band width relative to peak demand, not a statistical guarantee.">
       <div class="confidence-bar"><div class="confidence-bar-fill" style="width:${pct}%"></div></div>
       <span>${pct}%</span>
     </div>`;
+}
+
+function modelNameCell(model) {
+  const description = MODEL_DESCRIPTIONS[model] || "";
+  return `<span class="hint" title="${description}">${model}</span>`;
 }
 
 function renderTable(models) {
@@ -200,7 +216,7 @@ function renderTable(models) {
       const selected = m.model === selectedModel ? "selected" : "";
       return `
         <tr class="${selected}" data-model="${m.model}">
-          <td class="model-name">${m.model}</td>
+          <td class="model-name">${modelNameCell(m.model)}</td>
           <td class="num">${m.recommended_replicas}</td>
           <td class="num">${deltaCell(m.recommended_replicas, m.current_replicas)}</td>
           <td>${confidenceCell(m.confidence)}</td>
@@ -437,7 +453,7 @@ function renderReplay(result) {
     .map(
       (s, i) => `
         <tr class="${i === 0 ? "selected" : ""}">
-          <td class="model-name">${s.model}</td>
+          <td class="model-name">${modelNameCell(s.model)}</td>
           <td class="num">${s.n_anchors}</td>
           <td class="num">${s.mean_absolute_error.toFixed(2)}</td>
           <td class="num">${s.mean_absolute_pct_error.toFixed(1)}%</td>

@@ -7,6 +7,8 @@ services:
     environment:
       SCALESCOPE_MODE: demo
       SCALESCOPE_TICK_SECONDS: "2.0"
+      SCALESCOPE_AUTH_USERNAME: "${SCALESCOPE_AUTH_USERNAME:-}"
+      SCALESCOPE_AUTH_PASSWORD: "${SCALESCOPE_AUTH_PASSWORD:-}"
     volumes:
       - scalescope-data:/data
 
@@ -36,6 +38,8 @@ services:
       SCALESCOPE_K8S_KUBECONFIG: /kubeconfig/observer.kubeconfig
       SCALESCOPE_K8S_METRICS_URL: "${SCALESCOPE_K8S_METRICS_URL:-http://host.docker.internal:18080/metrics}"
       SCALESCOPE_ACTUATE: "${SCALESCOPE_ACTUATE:-false}"
+      SCALESCOPE_AUTH_USERNAME: "${SCALESCOPE_AUTH_USERNAME:-}"
+      SCALESCOPE_AUTH_PASSWORD: "${SCALESCOPE_AUTH_PASSWORD:-}"
     volumes:
       - scalescope-observe-data:/data
       - "${SCALESCOPE_OBSERVER_KUBECONFIG:-./scalescope-observer.kubeconfig}:/kubeconfig/observer.kubeconfig:ro"
