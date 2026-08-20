@@ -390,6 +390,9 @@ alone produces a real, varying pattern for a Kubernetes HPA (and ScaleScope)
 to react to. Exposes `sample_workload_demand_rps`/`latency_p95_ms`/
 `error_rate` Prometheus gauges — point `SCALESCOPE_K8S_METRICS_URL` at its
 `/metrics` endpoint to get real values for those fields instead of `0.0`.
+Its own `/timeline/pause`, `/timeline/resume`, and `/timeline/status`
+endpoints can freeze the background phase progression during controlled
+OBSERVE-mode tests.
 See `sample-workload/README.md` for build/push/deploy instructions.
 
 ## On-demand load triggers

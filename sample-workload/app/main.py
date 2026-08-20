@@ -23,6 +23,7 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from multiprocessing.synchronize import Event as MultiprocessingEvent
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -152,6 +153,10 @@ _TRIGGER_PHASES = {
 
 _manual_override: _LoadPhase | None = None
 _manual_override_until: float = 0.0
+_timeline_lock = threading.Lock()
+_timeline_paused = False
+_timeline_paused_since: float | None = None
+_timeline_paused_phase: _LoadPhase | None = None
 _stress_lock = threading.Lock()
 
 
@@ -178,6 +183,15 @@ class _StressRun:
 _stress_run: _StressRun | None = None
 
 
+def _base_phase(now: float) -> _LoadPhase:
+    position = now % _TIMELINE_TOTAL_SECONDS
+    for phase in _TIMELINE:
+        if position < phase.duration_s:
+            return phase
+        position -= phase.duration_s
+    return _TIMELINE[0]
+
+
 def _current_phase(now: float) -> _LoadPhase:
     global _manual_override
     if _manual_override is not None:
@@ -185,12 +199,54 @@ def _current_phase(now: float) -> _LoadPhase:
             return _manual_override
         _manual_override = None
 
-    position = now % _TIMELINE_TOTAL_SECONDS
-    for phase in _TIMELINE:
-        if position < phase.duration_s:
-            return phase
-        position -= phase.duration_s
-    return _TIMELINE[0]
+    with _timeline_lock:
+        if _timeline_paused and _timeline_paused_phase is not None:
+            return _timeline_paused_phase
+
+    return _base_phase(now)
+
+
+def _timeline_status(now: float | None = None) -> dict[str, object]:
+    now = time.time() if now is None else now
+    with _timeline_lock:
+        paused = _timeline_paused
+        paused_since = _timeline_paused_since
+        paused_phase = _timeline_paused_phase
+
+    phase = paused_phase if paused and paused_phase is not None else _base_phase(now)
+    paused_since_ts = (
+        datetime.fromtimestamp(paused_since, UTC).isoformat()
+        if paused_since is not None
+        else None
+    )
+    return {
+        "paused": paused,
+        "paused_since": paused_since_ts,
+        "phase": phase.name,
+    }
+
+
+def _pause_timeline(now: float | None = None) -> dict[str, object]:
+    global _timeline_paused, _timeline_paused_phase, _timeline_paused_since
+
+    now = time.time() if now is None else now
+    phase = _base_phase(now)
+    with _timeline_lock:
+        if not _timeline_paused:
+            _timeline_paused = True
+            _timeline_paused_since = now
+            _timeline_paused_phase = phase
+    return _timeline_status(now)
+
+
+def _resume_timeline() -> dict[str, object]:
+    global _timeline_paused, _timeline_paused_phase, _timeline_paused_since
+
+    with _timeline_lock:
+        _timeline_paused = False
+        _timeline_paused_since = None
+        _timeline_paused_phase = None
+    return _timeline_status()
 
 
 def _stress_active() -> bool:
@@ -389,6 +445,21 @@ def work(
     elapsed = time.monotonic() - start
     logger.debug("work request iterations=%d elapsed=%.4fs", iterations, elapsed)
     return {"iterations": iterations, "elapsed_seconds": elapsed, "digest": digest}
+
+
+@app.post("/timeline/pause")
+def pause_timeline() -> dict[str, object]:
+    return _pause_timeline()
+
+
+@app.post("/timeline/resume")
+def resume_timeline() -> dict[str, object]:
+    return _resume_timeline()
+
+
+@app.get("/timeline/status")
+def timeline_status() -> dict[str, object]:
+    return _timeline_status()
 
 
 @app.post("/trigger")

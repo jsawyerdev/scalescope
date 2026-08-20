@@ -60,6 +60,16 @@ def _install_prometheus_stub() -> None:
     sys.modules["prometheus_client"] = prometheus_client
 
 
+@pytest.fixture(autouse=True)
+def reset_sample_workload_state(sample_workload: ModuleType) -> None:
+    sample_workload._manual_override = None
+    sample_workload._manual_override_until = 0.0
+    with sample_workload._timeline_lock:
+        sample_workload._timeline_paused = False
+        sample_workload._timeline_paused_since = None
+        sample_workload._timeline_paused_phase = None
+
+
 def test_sample_workload_stress_trigger_uses_stress_runner(
     sample_workload: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -92,6 +102,60 @@ def test_sample_workload_pi_computation_is_deterministic(
     sample_workload: ModuleType,
 ) -> None:
     assert sample_workload._compute_pi_digits(20) == "3.14159265358979323846"
+
+
+def test_timeline_pause_freezes_base_phase(sample_workload: ModuleType) -> None:
+    assert sample_workload._pause_timeline(now=70.0) == {
+        "paused": True,
+        "paused_since": "1970-01-01T00:01:10+00:00",
+        "phase": "moderate",
+    }
+
+    assert sample_workload._current_phase(120.0).name == "moderate"
+    assert sample_workload._timeline_status(now=120.0) == {
+        "paused": True,
+        "paused_since": "1970-01-01T00:01:10+00:00",
+        "phase": "moderate",
+    }
+
+
+def test_timeline_resume_returns_to_wall_clock_phase(
+    sample_workload: ModuleType,
+) -> None:
+    sample_workload._pause_timeline(now=70.0)
+
+    status = sample_workload._resume_timeline()
+
+    assert status["paused"] is False
+    assert status["paused_since"] is None
+    assert sample_workload._current_phase(120.0).name == "traffic_spike"
+
+
+def test_manual_override_still_wins_while_timeline_paused(
+    sample_workload: ModuleType,
+) -> None:
+    sample_workload._pause_timeline(now=70.0)
+    sample_workload._manual_override = sample_workload._TRIGGER_PHASES["cpu"]
+    sample_workload._manual_override_until = 200.0
+
+    assert sample_workload._current_phase(120.0).name == "manual_cpu_spike"
+    assert sample_workload._current_phase(220.0).name == "moderate"
+
+
+def test_timeline_endpoints_report_pause_and_resume(
+    sample_workload: ModuleType,
+) -> None:
+    client = TestClient(sample_workload.app)
+
+    pause_response = client.post("/timeline/pause")
+    status_response = client.get("/timeline/status")
+    resume_response = client.post("/timeline/resume")
+
+    assert pause_response.status_code == 200
+    assert pause_response.json()["paused"] is True
+    assert status_response.json() == pause_response.json()
+    assert resume_response.status_code == 200
+    assert resume_response.json()["paused"] is False
 
 
 def test_scalescope_demo_rejects_observe_only_stress(

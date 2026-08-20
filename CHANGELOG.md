@@ -17,6 +17,10 @@ Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
   saturates available CPU cores with bounded multiprocessing Pi
   computation, while keeping the FastAPI event loop responsive and ending
   the worker processes at `duration_seconds`.
+- sample-workload now exposes `/timeline/pause`, `/timeline/resume`, and
+  `/timeline/status` so operators can freeze and observe the base
+  background phase progression during controlled tests without breaking
+  temporary manual load triggers.
 
 ## [0.7.1]
 

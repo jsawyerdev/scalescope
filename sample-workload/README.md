@@ -34,6 +34,10 @@ Routes:
   OBSERVE-mode collector reads the first three when
   `SCALESCOPE_K8S_METRICS_URL` points here (see the main README's "Wiring
   in a real cluster" section).
+- `POST /timeline/pause`, `POST /timeline/resume`, and
+  `GET /timeline/status` - freeze or resume the background timeline's base
+  phase at runtime. Manual `/trigger` overrides still run for their own
+  duration while the base timeline remains frozen underneath.
 - `POST /trigger?kind={cpu|memory|traffic|stress}&duration_seconds=45` - override
   the background timeline for `duration_seconds`, forcing that load
   pattern immediately. `stress` bypasses the timeline and starts one
