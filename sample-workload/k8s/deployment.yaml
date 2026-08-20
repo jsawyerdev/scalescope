@@ -24,9 +24,14 @@ spec:
         - name: sample-workload
           # Placeholder image - build sample-workload/Dockerfile and push it
           # to a registry this cluster can pull from, then update this
-          # reference (and imagePullPolicy below if not using :latest).
+          # reference. imagePullPolicy is Always because :latest is a
+          # mutable tag: with IfNotPresent, a node that already cached an
+          # older :latest silently keeps running it after a rebuild+push+
+          # rollout-restart, with no error - this bit the deployment once
+          # already. Pin to a digest and switch to IfNotPresent if that
+          # silent-staleness risk ever matters more than pull latency.
           image: scalescope-sample-workload:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
