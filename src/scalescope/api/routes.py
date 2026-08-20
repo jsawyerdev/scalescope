@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import threading
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+import polars as pl
+from fastapi import APIRouter, HTTPException, Query
 
 from scalescope.capacity import recommend_replicas
 from scalescope.config import settings
-from scalescope.diagnosis import diagnose
+from scalescope.diagnosis import DiagnosisResult, diagnose
+from scalescope.models.base import Forecast, ForecastModel
 from scalescope.models.baselines import (
     EwmaModel,
     LinearTrendModel,
@@ -22,7 +24,7 @@ from scalescope.storage import Store
 
 router = APIRouter(prefix="/api")
 
-_MODELS = {
+_MODELS: dict[str, ForecastModel] = {
     "naive": NaiveModel(),
     "seasonal_naive": SeasonalNaiveModel(),
     "ewma": EwmaModel(),
@@ -34,6 +36,13 @@ _DEFAULT_MODEL = "auto_ets"
 _HORIZON_STEPS = settings.forecast_horizon_steps
 _HISTORY_STEPS = settings.history_window_steps
 _STARTUP_LEAD_STEPS = 15  # models pod-startup + readiness lag in simulation ticks
+_MAX_OBSERVATIONS_LIMIT = 5000
+
+# Keyed by (workload, model) -> (latest observation ts, Forecast). A fixed-size
+# history window keeps len(history) constant once it fills, so the cache must
+# key on the newest timestamp rather than row count to invalidate correctly.
+_forecast_cache_lock = threading.Lock()
+_forecast_cache: dict[tuple[str, str], tuple[Any, Forecast]] = {}
 
 
 def get_store() -> Store:
@@ -41,7 +50,27 @@ def get_store() -> Store:
     # app_state is only populated once the FastAPI lifespan starts.
     from scalescope.main import app_state
 
-    return app_state["store"]
+    store: Store = app_state["store"]
+    return store
+
+
+def _require_known_workload(store: Store, workload: str) -> None:
+    if workload not in store.workloads():
+        raise HTTPException(status_code=404, detail=f"unknown workload: {workload}")
+
+
+def _get_forecast(workload: str, model: str, df: pl.DataFrame) -> Forecast:
+    history = df["request_rate"].to_numpy()
+    latest_ts = df["ts"][-1]
+    cache_key = (workload, model)
+    with _forecast_cache_lock:
+        cached = _forecast_cache.get(cache_key)
+        if cached is not None and cached[0] == latest_ts:
+            return cached[1]
+    forecast = _MODELS[model].predict(history, _HORIZON_STEPS)
+    with _forecast_cache_lock:
+        _forecast_cache[cache_key] = (latest_ts, forecast)
+    return forecast
 
 
 @router.get("/workloads")
@@ -50,23 +79,27 @@ def list_workloads() -> list[str]:
 
 
 @router.get("/workloads/{workload}/observations")
-def get_observations(workload: str, limit: int = 300) -> list[dict[str, Any]]:
-    df = get_store().recent_observations(workload, limit)
-    if df.is_empty():
-        raise HTTPException(status_code=404, detail=f"unknown workload: {workload}")
-    return df.to_dicts()
+def get_observations(
+    workload: str, limit: int = Query(default=300, ge=1, le=_MAX_OBSERVATIONS_LIMIT)
+) -> list[dict[str, Any]]:
+    store = get_store()
+    _require_known_workload(store, workload)
+    return store.recent_observations(workload, limit).to_dicts()
 
 
 @router.get("/workloads/{workload}/forecast")
 def get_forecast(workload: str, model: str = _DEFAULT_MODEL) -> dict[str, Any]:
     if model not in _MODELS:
         raise HTTPException(status_code=400, detail=f"unknown model: {model}")
-    df = get_store().recent_observations(workload, _HISTORY_STEPS)
+    store = get_store()
+    _require_known_workload(store, workload)
+    df = store.recent_observations(workload, _HISTORY_STEPS)
     if df.is_empty():
-        raise HTTPException(status_code=404, detail=f"unknown workload: {workload}")
+        raise HTTPException(
+            status_code=409, detail=f"no observations yet for workload: {workload}"
+        )
 
-    history = df["request_rate"].to_numpy()
-    forecast = _MODELS[model].predict(history, _HORIZON_STEPS)
+    forecast = _get_forecast(workload, model, df)
     return {
         "workload": workload,
         "model": forecast.model_name,
@@ -79,9 +112,13 @@ def get_forecast(workload: str, model: str = _DEFAULT_MODEL) -> dict[str, Any]:
 
 @router.get("/workloads/{workload}/diagnosis")
 def get_diagnosis(workload: str) -> dict[str, Any]:
-    df = get_store().recent_observations(workload, 30)
+    store = get_store()
+    _require_known_workload(store, workload)
+    df = store.recent_observations(workload, 30)
     if df.is_empty():
-        raise HTTPException(status_code=404, detail=f"unknown workload: {workload}")
+        raise HTTPException(
+            status_code=409, detail=f"no observations yet for workload: {workload}"
+        )
     result = diagnose(df)
     return {
         "workload": workload,
@@ -91,42 +128,65 @@ def get_diagnosis(workload: str) -> dict[str, Any]:
     }
 
 
-@router.get("/workloads/{workload}/recommendation")
-def get_recommendation(workload: str, model: str = _DEFAULT_MODEL) -> dict[str, Any]:
-    if model not in _MODELS:
-        raise HTTPException(status_code=400, detail=f"unknown model: {model}")
-    store = get_store()
-    df = store.recent_observations(workload, _HISTORY_STEPS)
-    if df.is_empty():
-        raise HTTPException(status_code=404, detail=f"unknown workload: {workload}")
-
+def _compute_recommendation(
+    workload: str, model: str, df: pl.DataFrame, diag: DiagnosisResult
+) -> dict[str, Any]:
     current_replicas = int(df["replicas"][-1])
-    history = df["request_rate"].to_numpy()
-    forecast = _MODELS[model].predict(history, _HORIZON_STEPS)
-    diag = diagnose(df.tail(30))
+    forecast = _get_forecast(workload, model, df)
     rec = recommend_replicas(current_replicas, forecast, peak_step=_STARTUP_LEAD_STEPS)
-
-    row = {
-        "ts": datetime.now(UTC),
-        "workload": workload,
-        "current_replicas": rec.current_replicas,
-        "recommended_replicas": (
-            rec.recommended_replicas if diag.scaling_will_help else current_replicas
-        ),
-        "reason": diag.explanation,
-        "confidence": rec.confidence,
-    }
-    store.insert_recommendation(row)
+    recommended_replicas = (
+        rec.recommended_replicas if diag.scaling_will_help else current_replicas
+    )
 
     return {
         "workload": workload,
         "model": model,
         "current_replicas": rec.current_replicas,
-        "recommended_replicas": row["recommended_replicas"],
+        "recommended_replicas": recommended_replicas,
         "peak_forecast_p90": rec.peak_forecast_p90,
         "projected_utilization": rec.projected_utilization,
         "confidence": rec.confidence,
         "scaling_will_help": diag.scaling_will_help,
         "diagnosis": diag.diagnosis.value,
         "explanation": diag.explanation,
+    }
+
+
+@router.get("/workloads/{workload}/recommendation")
+def get_recommendation(workload: str, model: str = _DEFAULT_MODEL) -> dict[str, Any]:
+    if model not in _MODELS:
+        raise HTTPException(status_code=400, detail=f"unknown model: {model}")
+    store = get_store()
+    _require_known_workload(store, workload)
+    df = store.recent_observations(workload, _HISTORY_STEPS)
+    if df.is_empty():
+        raise HTTPException(
+            status_code=409, detail=f"no observations yet for workload: {workload}"
+        )
+
+    diag = diagnose(df.tail(30))
+    return _compute_recommendation(workload, model, df, diag)
+
+
+@router.get("/workloads/{workload}/recommendations")
+def get_all_recommendations(workload: str) -> dict[str, Any]:
+    """Recommendation from every registered model, for side-by-side comparison."""
+    store = get_store()
+    _require_known_workload(store, workload)
+    df = store.recent_observations(workload, _HISTORY_STEPS)
+    if df.is_empty():
+        raise HTTPException(
+            status_code=409, detail=f"no observations yet for workload: {workload}"
+        )
+
+    diag = diagnose(df.tail(30))
+    return {
+        "workload": workload,
+        "diagnosis": diag.diagnosis.value,
+        "scaling_will_help": diag.scaling_will_help,
+        "explanation": diag.explanation,
+        "models": [
+            _compute_recommendation(workload, model_name, df, diag)
+            for model_name in _MODELS
+        ],
     }
