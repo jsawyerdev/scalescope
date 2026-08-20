@@ -4,6 +4,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.7.1]
+
+### Changed
+
+- Authentication remains available and recommended for exposed deployments,
+  but is no longer mandatory when `SCALESCOPE_ACTUATE=true`. Removed the
+  startup guard that refused to run without
+  `SCALESCOPE_AUTH_USERNAME`/`SCALESCOPE_AUTH_PASSWORD`, because a hard
+  refusal was too opinionated for a single-operator trusted-network tool.
+  LAN-only operators can deliberately run open/no-auth; ScaleScope now logs
+  the existing startup warning and continues.
+
 ## [0.7.0]
 
 ### Added

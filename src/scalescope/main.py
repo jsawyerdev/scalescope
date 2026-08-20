@@ -171,13 +171,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     store.close()
 
 
-if settings.actuate and not (settings.auth_username and settings.auth_password):
-    raise RuntimeError(
-        "SCALESCOPE_ACTUATE=true requires SCALESCOPE_AUTH_USERNAME and "
-        "SCALESCOPE_AUTH_PASSWORD to be set - unauthenticated write access "
-        "to a real cluster has no safe default"
-    )
-
 app = FastAPI(title="ScaleScope", lifespan=lifespan)
 
 

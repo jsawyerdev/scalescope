@@ -232,14 +232,13 @@ package set to `requirements-lock.txt` and leaves the service(s) running
 
 Both `SCALESCOPE_AUTH_USERNAME` and `SCALESCOPE_AUTH_PASSWORD` unset (the
 default): no authentication — every route, including the dashboard itself,
-is open. Fine for a local single-operator demo; not fine once
-`SCALESCOPE_ACTUATE=true` gives an unauthenticated surface write access to
-a real Deployment's replica count. Set both to enable HTTP Basic Auth
+is open. This is an explicit supported mode for trusted-LAN or homelab
+operators who deliberately accept that risk. When `SCALESCOPE_ACTUATE=true`
+is set without credentials, ScaleScope logs a startup warning and still
+starts. Set both variables to enable HTTP Basic Auth
 (`src/scalescope/auth.py`, applied as ASGI middleware so it covers the
 static dashboard files as well as `/api/*`, not just the API):
 
-- `main.py` refuses to start if `SCALESCOPE_ACTUATE=true` without both
-  set — there is no safe default for that combination.
 - `GET /healthz` is the one exempt route (unauthenticated liveness check;
   the Docker `HEALTHCHECK` uses it).
 - Browsers handle the login prompt natively — no dashboard login form was

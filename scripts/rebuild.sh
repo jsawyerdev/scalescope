@@ -50,8 +50,8 @@ AUTH_USERNAME=""
 AUTH_PASSWORD=""
 ENV_FILE="$ROOT_DIR/.env"
 if [ -f "$ENV_FILE" ]; then
-    AUTH_USERNAME="$(grep -m1 '^SCALESCOPE_AUTH_USERNAME=' "$ENV_FILE" | cut -d= -f2-)"
-    AUTH_PASSWORD="$(grep -m1 '^SCALESCOPE_AUTH_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)"
+    AUTH_USERNAME="$(awk -F= '$1 == "SCALESCOPE_AUTH_USERNAME" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE")"
+    AUTH_PASSWORD="$(awk -F= '$1 == "SCALESCOPE_AUTH_PASSWORD" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE")"
 fi
 
 curl_auth() {
