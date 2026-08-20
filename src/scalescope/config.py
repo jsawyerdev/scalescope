@@ -22,6 +22,9 @@ class Settings:
     k8s_deployment: str = os.environ.get("SCALESCOPE_K8S_DEPLOYMENT", "sample-workload")
     k8s_kubeconfig: str | None = os.environ.get("SCALESCOPE_K8S_KUBECONFIG")
     k8s_metrics_url: str | None = os.environ.get("SCALESCOPE_K8S_METRICS_URL")
+    # Opt-in on top of mode=observe: observing a cluster must never imply
+    # writing to it by default.
+    actuate: bool = os.environ.get("SCALESCOPE_ACTUATE", "false").lower() == "true"
 
 
 settings = Settings()

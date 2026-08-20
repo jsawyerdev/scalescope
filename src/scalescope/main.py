@@ -14,12 +14,16 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from scalescope.api.routes import router
+from scalescope.capacity import STARTUP_LEAD_STEPS, recommend_replicas
 from scalescope.config import settings
+from scalescope.diagnosis import diagnose
+from scalescope.k8s_actuator import ActuationError, HpaConflictError, KubernetesActuator
 from scalescope.k8s_collector import (
     KubernetesObservationCollector,
     KubernetesUnavailableError,
 )
 from scalescope.logging_config import configure_logging
+from scalescope.models.statsforecast_model import AutoEtsModel
 from scalescope.simulator import WorkloadSimulator
 from scalescope.storage import Store
 
@@ -40,6 +44,10 @@ def _init_source_state() -> dict[str, Any]:
         "connected": settings.mode == "demo",
         "last_success_ts": None,
         "last_error": None,
+        "actuate": settings.actuate,
+        "last_actuation_ts": None,
+        "last_actuation_replicas": None,
+        "last_actuation_error": None,
     }
 
 
@@ -50,6 +58,37 @@ async def _simulation_loop(store: Store) -> None:
         store.insert_observation(row)
         app_state["source"]["last_success_ts"] = datetime.now(UTC)
         await asyncio.sleep(settings.simulation_tick_seconds)
+
+
+def _actuate(store: Store, actuator: KubernetesActuator) -> None:
+    source = app_state["source"]
+    df = store.recent_observations(
+        settings.k8s_deployment, settings.history_window_steps
+    )
+    if df.is_empty():
+        return
+
+    diag = diagnose(df.tail(30))
+    if not diag.scaling_will_help:
+        source["last_actuation_error"] = f"skipped: {diag.explanation}"
+        return
+
+    current_replicas = int(df["replicas"][-1])
+    forecast = AutoEtsModel().predict(
+        df["request_rate"].to_numpy(), settings.forecast_horizon_steps
+    )
+    rec = recommend_replicas(current_replicas, forecast, peak_step=STARTUP_LEAD_STEPS)
+    if rec.recommended_replicas == current_replicas:
+        return
+
+    try:
+        actuator.scale(settings.k8s_deployment, rec.recommended_replicas)
+        source["last_actuation_ts"] = datetime.now(UTC)
+        source["last_actuation_replicas"] = rec.recommended_replicas
+        source["last_actuation_error"] = None
+    except (HpaConflictError, ActuationError) as exc:
+        logger.warning("actuation skipped: %s", exc)
+        source["last_actuation_error"] = str(exc)
 
 
 async def _observe_loop(store: Store) -> None:
@@ -72,6 +111,17 @@ async def _observe_loop(store: Store) -> None:
         source["last_error"] = str(exc)
         return
 
+    actuator: KubernetesActuator | None = None
+    if settings.actuate:
+        actuator = await asyncio.to_thread(
+            KubernetesActuator, settings.k8s_namespace, settings.k8s_kubeconfig
+        )
+        logger.warning(
+            "actuation enabled: will write replicas to %s/%s",
+            settings.k8s_namespace,
+            settings.k8s_deployment,
+        )
+
     while True:
         try:
             row = await asyncio.to_thread(collector.collect)
@@ -79,6 +129,8 @@ async def _observe_loop(store: Store) -> None:
             source["connected"] = True
             source["last_success_ts"] = datetime.now(UTC)
             source["last_error"] = None
+            if actuator is not None:
+                await asyncio.to_thread(_actuate, store, actuator)
         except KubernetesUnavailableError as exc:
             logger.warning(
                 "deployment %s/%s unreachable this tick",

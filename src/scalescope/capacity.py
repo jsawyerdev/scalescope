@@ -16,6 +16,7 @@ MIN_REPLICAS = 3
 MAX_REPLICAS = 30
 MAX_SCALE_UP_PER_STEP = 4
 MAX_SCALE_DOWN_PER_STEP = 2
+STARTUP_LEAD_STEPS = 15  # models pod-startup + readiness lag in simulation ticks
 
 
 @dataclass(frozen=True)

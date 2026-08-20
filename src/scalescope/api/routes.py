@@ -9,7 +9,7 @@ from typing import Any
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query
 
-from scalescope.capacity import recommend_replicas
+from scalescope.capacity import STARTUP_LEAD_STEPS, recommend_replicas
 from scalescope.config import settings
 from scalescope.diagnosis import DiagnosisResult, diagnose
 from scalescope.models.base import Forecast, ForecastModel
@@ -36,7 +36,6 @@ _MODELS: dict[str, ForecastModel] = {
 _DEFAULT_MODEL = "auto_ets"
 _HORIZON_STEPS = settings.forecast_horizon_steps
 _HISTORY_STEPS = settings.history_window_steps
-_STARTUP_LEAD_STEPS = 15  # models pod-startup + readiness lag in simulation ticks
 _MAX_OBSERVATIONS_LIMIT = 5000
 _VERSION = _package_version("scalescope")
 
@@ -145,7 +144,7 @@ def _compute_recommendation(
 ) -> dict[str, Any]:
     current_replicas = int(df["replicas"][-1])
     forecast = _get_forecast(workload, model, df)
-    rec = recommend_replicas(current_replicas, forecast, peak_step=_STARTUP_LEAD_STEPS)
+    rec = recommend_replicas(current_replicas, forecast, peak_step=STARTUP_LEAD_STEPS)
     recommended_replicas = (
         rec.recommended_replicas if diag.scaling_will_help else current_replicas
     )
