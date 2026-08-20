@@ -115,6 +115,7 @@ class KubernetesObservationCollector:
         self._apps = client.AppsV1Api()
         self._core = client.CoreV1Api()
         self._custom = client.CustomObjectsApi()
+        self.cluster_server = client.Configuration.get_default_copy().host
 
     def collect(self) -> dict:
         try:

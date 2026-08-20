@@ -6,6 +6,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,15 +29,31 @@ logger = logging.getLogger(__name__)
 app_state: dict[str, Any] = {}
 
 
+def _init_source_state() -> dict[str, Any]:
+    return {
+        "mode": settings.mode,
+        "k8s_namespace": settings.k8s_namespace if settings.mode == "observe" else None,
+        "k8s_deployment": (
+            settings.k8s_deployment if settings.mode == "observe" else None
+        ),
+        "cluster_server": None,
+        "connected": settings.mode == "demo",
+        "last_success_ts": None,
+        "last_error": None,
+    }
+
+
 async def _simulation_loop(store: Store) -> None:
     simulator = WorkloadSimulator()
     while True:
         row = simulator.step()
         store.insert_observation(row)
+        app_state["source"]["last_success_ts"] = datetime.now(UTC)
         await asyncio.sleep(settings.simulation_tick_seconds)
 
 
 async def _observe_loop(store: Store) -> None:
+    source = app_state["source"]
     try:
         collector = await asyncio.to_thread(
             KubernetesObservationCollector,
@@ -45,24 +62,31 @@ async def _observe_loop(store: Store) -> None:
             settings.k8s_kubeconfig,
             settings.k8s_metrics_url,
         )
-    except Exception:
+        source["cluster_server"] = collector.cluster_server
+    except Exception as exc:
         logger.exception(
             "could not initialize Kubernetes client for %s/%s; observe loop not started",
             settings.k8s_namespace,
             settings.k8s_deployment,
         )
+        source["last_error"] = str(exc)
         return
 
     while True:
         try:
             row = await asyncio.to_thread(collector.collect)
             store.insert_observation(row)
-        except KubernetesUnavailableError:
+            source["connected"] = True
+            source["last_success_ts"] = datetime.now(UTC)
+            source["last_error"] = None
+        except KubernetesUnavailableError as exc:
             logger.warning(
                 "deployment %s/%s unreachable this tick",
                 settings.k8s_namespace,
                 settings.k8s_deployment,
             )
+            source["connected"] = False
+            source["last_error"] = str(exc)
         await asyncio.sleep(settings.simulation_tick_seconds)
 
 
@@ -70,6 +94,7 @@ async def _observe_loop(store: Store) -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     store = Store(settings.db_path)
     app_state["store"] = store
+    app_state["source"] = _init_source_state()
 
     task: asyncio.Task | None = None
     if settings.mode == "demo":

@@ -54,6 +54,15 @@ def get_store() -> Store:
     return store
 
 
+@router.get("/source")
+def get_source() -> dict[str, Any]:
+    """What ScaleScope is actually observing right now: mode and cluster identity."""
+    from scalescope.main import app_state
+
+    source: dict[str, Any] = app_state["source"]
+    return source
+
+
 def _require_known_workload(store: Store, workload: str) -> None:
     if workload not in store.workloads():
         raise HTTPException(status_code=404, detail=f"unknown workload: {workload}")
