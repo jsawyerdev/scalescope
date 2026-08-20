@@ -4,6 +4,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.6.2]
+
+### Fixed
+
+- `./scripts/rebuild.sh` crashed immediately with
+  `COMPOSE_PROFILE_ARGS[@]: unbound variable` on this machine's shell.
+  Root cause, confirmed by checking `bash --version` directly: macOS
+  ships bash 3.2 (frozen there for licensing reasons), which treats
+  `"${EMPTY_ARRAY[@]}"` as unbound under `set -u`; bash 4.4+ does not.
+  Replaced the array with a `compose()` wrapper function that branches
+  on `$WITH_OBSERVE` instead of expanding a possibly-empty array.
+- `Dockerfile` had a duplicated `&&` in both `apt-get` `RUN` layers
+  (`apt-get upgrade -qy && && apt-get install ...`), left over from an
+  in-progress edit that added the `upgrade` step; both stages failed to
+  build. Fixed the shell syntax.
+
+### Changed
+
+- Base image and toolchain moved to Python 3.14
+  (`python:3.14-slim`, `requires-python = ">=3.14,<3.15"`, matching
+  `ruff`/`black`/`mypy` target-versions). Verified clean: full
+  dependency stack (`lightgbm`, `statsforecast`, `mlforecast`, `duckdb`,
+  `pandas`, `scikit-learn`, `statsmodels`, ...) resolves and installs on
+  3.14 with no version conflicts, `ruff`/`black --check`/`mypy`/`pytest`
+  all pass unchanged, both DEMO and OBSERVE containers rebuilt and
+  verified live on the new image.
+- `scripts/rebuild.sh`'s local venv creation now tries `python3.14`
+  first (was `python3.13`), matching the new `requires-python` floor.
+
 ## [0.6.1]
 
 ### Documentation

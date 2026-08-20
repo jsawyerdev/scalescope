@@ -44,7 +44,6 @@ DEMO_URL="http://localhost:8000"
 OBSERVE_URL="http://localhost:8001"
 KUBECONFIG_PATH="${SCALESCOPE_OBSERVER_KUBECONFIG:-./scalescope-observer.kubeconfig}"
 
-COMPOSE_PROFILE_ARGS=()
 if [ "$WITH_OBSERVE" -eq 1 ]; then
     if [ ! -f "$KUBECONFIG_PATH" ]; then
         echo "ERROR: --observe requires a kubeconfig at $KUBECONFIG_PATH" >&2
@@ -52,19 +51,30 @@ if [ "$WITH_OBSERVE" -eq 1 ]; then
         echo "  2. OUTPUT_PATH=$KUBECONFIG_PATH ./scripts/generate-observer-kubeconfig.sh" >&2
         exit 1
     fi
-    COMPOSE_PROFILE_ARGS=(--profile observe)
 fi
+
+# macOS ships bash 3.2 (frozen there for licensing reasons), which treats
+# "${EMPTY_ARRAY[@]}" as unbound under `set -u` - bash 4.4+ does not. A
+# wrapper function sidesteps the array entirely instead of relying on a
+# bash version this script can't assume.
+compose() {
+    if [ "$WITH_OBSERVE" -eq 1 ]; then
+        docker compose --profile observe "$@"
+    else
+        docker compose "$@"
+    fi
+}
 
 echo "== tearing down existing containers =="
 if [ "$WIPE_DATA" -eq 1 ]; then
-    docker compose "${COMPOSE_PROFILE_ARGS[@]}" down --volumes
+    compose down --volumes
 else
-    docker compose "${COMPOSE_PROFILE_ARGS[@]}" down
+    compose down
 fi
 
 echo "== rebuilding venv: $VENV_DIR =="
 rm -rf "$VENV_DIR"
-python3.13 -m venv "$VENV_DIR" 2>/dev/null || python3 -m venv "$VENV_DIR"
+python3.14 -m venv "$VENV_DIR" 2>/dev/null || python3 -m venv "$VENV_DIR"
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 
@@ -85,15 +95,15 @@ echo "== tests =="
 pytest -q
 
 echo "== docker compose build (no cache, latest base image) =="
-docker compose "${COMPOSE_PROFILE_ARGS[@]}" build --no-cache --pull
+compose build --no-cache --pull
 
 echo "== starting service(s) =="
-docker compose "${COMPOSE_PROFILE_ARGS[@]}" up -d --force-recreate
+compose up -d --force-recreate
 
 on_failure() {
     echo "STARTUP FAILED" >&2
-    docker compose "${COMPOSE_PROFILE_ARGS[@]}" logs >&2
-    docker compose "${COMPOSE_PROFILE_ARGS[@]}" down
+    compose logs >&2
+    compose down
     exit 1
 }
 trap on_failure ERR
@@ -122,4 +132,4 @@ echo "DEMO:    $DEMO_URL"
 if [ "$WITH_OBSERVE" -eq 1 ]; then
     echo "OBSERVE: $OBSERVE_URL"
 fi
-docker compose "${COMPOSE_PROFILE_ARGS[@]}" ps
+compose ps

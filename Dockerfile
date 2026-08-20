@@ -1,10 +1,18 @@
 # syntax=docker/dockerfile:1.7
 
-FROM python:3.13-slim AS builder
+FROM python:3.14-slim AS builder
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONUNBUFFERED=1 \
+    TZ=Europe/London \
+    PYTHONOPTIMIZE=1 \
+    PYTHONHASHSEED=0 \
+    PIP_ROOT_USER_ACTION=ignore \
+    PIP_PROGRESS_BAR=off
+
+RUN apt-get update -q && \
+    apt-get upgrade -qy && \
+    apt-get install -y --no-install-recommends libgomp1 && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
@@ -16,19 +24,21 @@ WORKDIR /app
 COPY pyproject.toml ./
 RUN --mount=type=cache,target=/root/.cache/pip \
     mkdir -p src/scalescope && touch src/scalescope/__init__.py \
-    && pip install --upgrade pip \
-    && pip install .
+    && pip install --upgrade pip setuptools wheel \
+    && pip install . 
 
 COPY src ./src
+
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-deps .
+    pip install --upgrade --no-cache-dir  --no-deps .
 
-FROM python:3.13-slim AS runtime
+FROM python:3.14-slim AS runtime
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 1000 scalescope
+RUN apt-get update -q && \
+    apt-get upgrade -qy && \
+    apt-get install -y --no-install-recommends libgomp1 && \
+    rm -rf /var/lib/apt/lists/* && \
+    useradd --create-home --uid 1000 scalescope
 
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH" \
