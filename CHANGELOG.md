@@ -4,6 +4,53 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.5.0]
+
+### Added
+
+- **On-demand load triggers**: `POST /api/workloads/{name}/trigger?kind={cpu|memory|traffic}`
+  forces a load pattern immediately - DEMO mode drives the local simulator
+  directly (`WorkloadSimulator.trigger_fault`); OBSERVE mode proxies to the
+  real workload's own new `POST /trigger` endpoint
+  (`sample-workload/app/main.py`). Dashboard gained three "Generate load"
+  buttons that call this and show a live countdown.
+
+### Fixed
+
+- The documented `kubectl port-forward` convention for reaching a
+  workload's `/metrics` from outside the cluster is a foreground/background
+  host process with no supervision - it died silently multiple times this
+  session, breaking metrics scraping and the new /trigger calls with no
+  visible cause until manually noticed. `.env.example` and
+  `docker-compose.yml` now recommend a LoadBalancer Service's stable IP
+  instead where the cluster can provision one (this cluster already runs
+  MetalLB or equivalent - confirmed via other Services with real external
+  IPs) - not a fragile local process.
+
+## [0.4.0]
+
+### Added
+
+- **Actuation**: `SCALESCOPE_ACTUATE=true` (opt-in on top of `SCALESCOPE_MODE=observe`)
+  makes ScaleScope actually write recommended replica counts to the cluster,
+  via `k8s_actuator.py`'s `patch` on the `deployments/scale` subresource
+  only. Refuses to write if a `HorizontalPodAutoscaler` already targets the
+  same Deployment (two controllers writing the same replica count fight
+  each other), surfaced via `GET /api/source`'s new
+  `actuate`/`last_actuation_ts`/`last_actuation_replicas`/`last_actuation_error`
+  fields rather than failing silently.
+- `k8s/rbac/`: added `patch`/`update` on `deployments/scale` and `get`/`list`
+  on `horizontalpodautoscalers` to the Role. Renamed the identity
+  `scalescope-observer` → `scalescope-actuator` throughout (RBAC object
+  names should describe what an identity can actually do).
+
+### Verified
+
+- Against the real cluster: removed `sample-workload`'s HPA, enabled
+  actuation, and confirmed via `kubectl`'s own event log
+  (`Scaled down replica set ... from 8 to 6`) that ScaleScope's write
+  actually changed the Deployment - not self-reported.
+
 ## [0.3.1]
 
 ### Added

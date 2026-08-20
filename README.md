@@ -6,7 +6,7 @@ runs that alongside a deterministic diagnosis engine that flags when scaling is
 the wrong response (CPU limit throttling, memory leak, node capacity exhaustion,
 HPA ceiling, non-CPU bottleneck).
 
-## Status: v0.3 (demo + observe modes, verified against a real cluster)
+## Status: v0.5 (demo + observe + opt-in actuation + on-demand load triggers, verified against a real cluster)
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed at each version.
 
@@ -44,6 +44,7 @@ flowchart TB
 
     subgraph SCALESCOPE["ScaleScope process"]
         COLLECTOR["k8s_collector.py<br/>read-only, least-privilege RBAC"]
+        ACTUATOR["k8s_actuator.py<br/>opt-in write, refuses if a<br/>competing HPA exists"]
         STORE[("storage.py<br/>DuckDB")]
         MODELS["models/*.py<br/>naive · seasonal_naive · ewma · linear_trend<br/>auto_ets (StatsForecast) · lightgbm_quantile"]
         CAPACITY["capacity.py<br/>forecast to required replicas"]
@@ -65,6 +66,10 @@ flowchart TB
     DIAGNOSIS --> API
     STORE --> API
     API --> UI
+
+    CAPACITY -.->|recommended replicas,<br/>SCALESCOPE_ACTUATE=true only| ACTUATOR
+    DIAGNOSIS -.->|scaling_will_help| ACTUATOR
+    ACTUATOR -.->|patch deployments/scale| DEPLOY
 ```
 
 The forecaster never predicts CPU-per-pod directly, because scaling changes
@@ -230,6 +235,9 @@ See `sample-workload/README.md` for build/push/deploy instructions.
 - `GET /api/workloads/{name}/recommendation?model=...`
 - `GET /api/workloads/{name}/recommendations` — all six models, side by side
 - `GET /api/source` — what this instance is actually observing (mode, cluster, connection status)
+- `POST /api/workloads/{name}/trigger?kind={cpu|memory|traffic}&duration_seconds=45` — force a load
+  pattern now (DEMO: the local simulator; OBSERVE: proxied to the real workload's own `/trigger`,
+  requires `SCALESCOPE_K8S_METRICS_URL`) — what the dashboard's "Generate load" buttons call
 
 ## Develop locally
 
