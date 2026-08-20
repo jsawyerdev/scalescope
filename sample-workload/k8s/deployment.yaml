@@ -27,9 +27,9 @@ spec:
           # reference. imagePullPolicy is Always because :latest is a
           # mutable tag: with IfNotPresent, a node that already cached an
           # older :latest silently keeps running it after a rebuild+push+
-          # rollout-restart, with no error - this bit the deployment once
-          # already. Pin to a digest and switch to IfNotPresent if that
-          # silent-staleness risk ever matters more than pull latency.
+          # rollout-restart, with no error. Pin to a digest and switch to
+          # IfNotPresent if that silent-staleness risk ever matters more
+          # than pull latency.
           image: scalescope-sample-workload:latest
           imagePullPolicy: Always
           securityContext:
