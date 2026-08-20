@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from importlib.metadata import version as _package_version
 from typing import Any
 
 import polars as pl
@@ -37,6 +38,7 @@ _HORIZON_STEPS = settings.forecast_horizon_steps
 _HISTORY_STEPS = settings.history_window_steps
 _STARTUP_LEAD_STEPS = 15  # models pod-startup + readiness lag in simulation ticks
 _MAX_OBSERVATIONS_LIMIT = 5000
+_VERSION = _package_version("scalescope")
 
 # Keyed by (workload, model) -> (latest observation ts, Forecast). A fixed-size
 # history window keeps len(history) constant once it fills, so the cache must
@@ -59,7 +61,8 @@ def get_source() -> dict[str, Any]:
     """What ScaleScope is actually observing right now: mode and cluster identity."""
     from scalescope.main import app_state
 
-    source: dict[str, Any] = app_state["source"]
+    source: dict[str, Any] = dict(app_state["source"])
+    source["version"] = _VERSION
     return source
 
 
