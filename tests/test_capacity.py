@@ -22,7 +22,9 @@ def test_recommendation_step_is_rate_limited():
 
 
 def test_stable_demand_keeps_replicas_flat():
-    # current replicas already sized for this demand at target utilization
-    forecast = _forecast([8 * 220.0 * 0.70] * 10)
+    # sizing is driven by p90 (=1.2x p50 in the _forecast helper), so pick p50
+    # such that p90 lands exactly at 8 replicas worth of target-utilization capacity
+    p90_target = 8 * 220.0 * 0.70
+    forecast = _forecast([p90_target / 1.2] * 10)
     rec = recommend_replicas(current_replicas=8, forecast=forecast, peak_step=9)
     assert rec.recommended_replicas == 8
