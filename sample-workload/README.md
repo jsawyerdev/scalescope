@@ -1,7 +1,7 @@
 # sample-workload
 
 A minimal, self-contained CPU-bound HTTP service to deploy into a real
-Kubernetes cluster as a test target - something for a real HPA (and later
+Kubernetes cluster as a test target - something for a real HPA (and
 ScaleScope's OBSERVE mode) to actually scale in response to.
 
 Independent of the ScaleScope app itself (`src/scalescope/`): no shared code,
@@ -9,15 +9,27 @@ config, or image.
 
 ## What it does
 
-`app/main.py` is a small FastAPI app:
+`app/main.py` is a small FastAPI app that generates its own load - no
+external traffic required. A background task randomly cycles through
+phases (idle, moderate, traffic_spike, memory_leak, error_burst), each
+driving real SHA-256-hashing CPU work (not a sleep), a bounded
+self-releasing simulated memory leak, and synthetic error injection. This
+is what makes the deployment alone - `kubectl apply -f k8s/`, nothing else -
+produce a real, varying CPU/memory pattern a Kubernetes HPA reacts to.
+
+Routes:
 
 - `GET /` and `GET /healthz` - liveness/readiness, returns `200 ok`.
-- `GET /work?iterations=N` - performs `N` rounds of SHA-256 hashing
-  (default 200,000) before responding. This is real, bounded CPU work, not
-  a sleep, so request volume against it shows up as genuine CPU usage in
-  `kubectl top pods` and in the metrics a real HPA (or ScaleScope) reads.
-- `GET /metrics` - Prometheus-format request count/latency metrics
-  (`prometheus-client`).
+- `GET /work?iterations=N` - on-demand extra CPU work (SHA-256 hashing,
+  default 200,000 rounds), independent of the background simulator, for
+  driving additional load manually if you want to.
+- `GET /metrics` - Prometheus-format metrics: standard request
+  count/latency, plus `sample_workload_demand_rps`,
+  `_latency_p95_ms`, `_error_rate`, `_simulated_fault`, and `_leak_bytes`
+  gauges reflecting the background simulator's current state. ScaleScope's
+  OBSERVE-mode collector reads the first three when
+  `SCALESCOPE_K8S_METRICS_URL` points here (see the main README's "Wiring
+  in a real cluster" section).
 
 ## Build the image
 
@@ -73,29 +85,25 @@ Requires a metrics-server (or equivalent) in the cluster for the HPA to read
 CPU utilization; most clusters, including a standard Talos setup, already
 run one.
 
-## Drive load against it
+## Watch it react
 
-Port-forward the Service locally:
+Nothing else to run - the background simulator starts producing varying
+load as soon as the pods are up:
+
+```
+kubectl get hpa -n scalescope-demo -w
+kubectl top pods -n scalescope-demo
+```
+
+To add extra load on top of the self-generated pattern (optional),
+port-forward the Service and run the bundled generator, which ramps
+concurrency up, holds it sustained, then drops back to idle:
 
 ```
 kubectl port-forward -n scalescope-demo svc/sample-workload 8080:80
-```
-
-Then run the bundled load generator, which ramps concurrency up, holds it
-sustained, then drops it back to idle - a pattern with enough shape for an
-HPA (or ScaleScope) to react to:
-
-```
 sample-workload/scripts/generate-load.sh http://localhost:8080/work 20 120
 ```
 
 Arguments: target URL, max concurrent requests (default 20), seconds per
 ramp/sustained/drop phase (default 120). Set `WORK_ITERATIONS` to change how
 much CPU each request burns (default 300000).
-
-Watch it react:
-
-```
-kubectl get hpa -n scalescope-demo -w
-kubectl top pods -n scalescope-demo
-```

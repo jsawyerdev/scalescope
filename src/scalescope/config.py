@@ -11,7 +11,7 @@ class Settings:
     """Runtime configuration, overridable via environment variables."""
 
     db_path: str = os.environ.get("SCALESCOPE_DB_PATH", "/data/scalescope.duckdb")
-    mode: str = os.environ.get("SCALESCOPE_MODE", "demo")  # demo | observe (roadmap)
+    mode: str = os.environ.get("SCALESCOPE_MODE", "demo")  # demo | observe
     simulation_tick_seconds: float = float(
         os.environ.get("SCALESCOPE_TICK_SECONDS", "2.0")
     )

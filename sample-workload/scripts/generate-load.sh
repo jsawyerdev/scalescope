@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Lightweight load generator for the sample-workload service. Drives a
 # ramp-up / sustained / drop-off pattern of concurrent curl requests against
-# /work so a real HPA (and later ScaleScope) has something to react to.
+# /work so a real HPA (and ScaleScope) has something to react to, on top of
+# the app's own background self-load simulator.
 #
 # Usage:
 #   ./generate-load.sh <url> [max_concurrency] [phase_seconds]

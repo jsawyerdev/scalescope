@@ -20,7 +20,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import PlainTextResponse, Response
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -32,10 +38,8 @@ _HASH_INPUT = b"scalescope-sample-workload-load-generator"
 _TICK_SECONDS = float(os.environ.get("SIM_TICK_SECONDS", "1.0"))
 _LATENCY_WINDOW_SIZE = 200
 
-# --- Prometheus metrics, scraped by ScaleScope's OBSERVE-mode collector ----
-#
-# These are plain instantaneous gauges (not counters needing PromQL rate())
-# specifically so a simple text scrape can read them directly - see
+# Plain instantaneous gauges (not counters needing PromQL rate()) so a
+# simple text scrape can read them directly - see
 # src/scalescope/k8s_collector.py's `_scrape_workload_metrics`. Renaming
 # these breaks that contract; keep the two in sync if either changes.
 REQUEST_COUNT = Counter(
@@ -45,10 +49,15 @@ REQUEST_LATENCY = Histogram(
     "sample_workload_request_duration_seconds", "Request duration in seconds", ["path"]
 )
 DEMAND_RPS = Gauge("sample_workload_demand_rps", "Current simulated request rate")
-LATENCY_P95_MS = Gauge("sample_workload_latency_p95_ms", "Rolling p95 request latency, ms")
-ERROR_RATE = Gauge("sample_workload_error_rate", "Rolling fraction of requests erroring, 0-1")
+LATENCY_P95_MS = Gauge(
+    "sample_workload_latency_p95_ms", "Rolling p95 request latency, ms"
+)
+ERROR_RATE = Gauge(
+    "sample_workload_error_rate", "Rolling fraction of requests erroring, 0-1"
+)
 SIMULATED_FAULT = Gauge(
-    "sample_workload_simulated_fault", "1 if a simulated fault is currently active, else 0"
+    "sample_workload_simulated_fault",
+    "1 if a simulated fault is currently active, else 0",
 )
 MEMORY_LEAK_BYTES = Gauge(
     "sample_workload_leak_bytes", "Bytes currently held by the simulated memory leak"
@@ -86,8 +95,12 @@ class _LoadPhase:
     """One stretch of simulated behaviour: how much CPU/error/leak to produce."""
 
     def __init__(
-        self, name: str, duration_s: tuple[float, float], demand_rps: tuple[float, float],
-        error_rate: float, leak_bytes_per_tick: int,
+        self,
+        name: str,
+        duration_s: tuple[float, float],
+        demand_rps: tuple[float, float],
+        error_rate: float,
+        leak_bytes_per_tick: int,
     ) -> None:
         self.name = name
         self.duration_s = duration_s
@@ -132,10 +145,14 @@ async def _load_simulator() -> None:
             latency_ms = (time.monotonic() - start) * 1000
             is_error = rng.random() < phase.error_rate
             _record_outcome(latency_ms, is_error)
-            REQUEST_COUNT.labels(path="/internal-load", status="500" if is_error else "200").inc()
+            REQUEST_COUNT.labels(
+                path="/internal-load", status="500" if is_error else "200"
+            ).inc()
 
             if phase.leak_bytes_per_tick:
-                grow = min(phase.leak_bytes_per_tick, _LEAK_CAP_BYTES - len(_leak_buffer))
+                grow = min(
+                    phase.leak_bytes_per_tick, _LEAK_CAP_BYTES - len(_leak_buffer)
+                )
                 if grow > 0:
                     _leak_buffer.extend(b"x" * grow)
                 MEMORY_LEAK_BYTES.set(len(_leak_buffer))
@@ -144,7 +161,9 @@ async def _load_simulator() -> None:
             elapsed += _TICK_SECONDS
 
         if phase.name == "memory_leak" and _leak_buffer:
-            logger.info("memory_leak phase ended, releasing %d bytes", len(_leak_buffer))
+            logger.info(
+                "memory_leak phase ended, releasing %d bytes", len(_leak_buffer)
+            )
             _leak_buffer.clear()
             MEMORY_LEAK_BYTES.set(0)
 
@@ -173,19 +192,19 @@ async def _record_metrics(request: Request, call_next):
 
 @app.get("/metrics")
 def metrics() -> Response:
-    """Prometheus-format metrics endpoint."""
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/healthz", response_class=PlainTextResponse)
 @app.get("/", response_class=PlainTextResponse)
 def healthz() -> str:
-    """Liveness/readiness endpoint."""
     return "ok"
 
 
 @app.get("/work")
-def work(iterations: int = Query(default=200_000, ge=1, le=20_000_000)) -> dict[str, object]:
+def work(
+    iterations: int = Query(default=200_000, ge=1, le=20_000_000)
+) -> dict[str, object]:
     """On-demand extra CPU work, independent of the background self-load simulator."""
     start = time.monotonic()
     digest = _burn_cpu(iterations)
