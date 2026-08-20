@@ -4,6 +4,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.5.4]
+
+### Fixed
+
+- Actuation state (`actuate`/`last_actuation_ts`/`last_actuation_replicas`/
+  `last_actuation_error`) was computed by the backend and exposed via
+  `GET /api/source` but never read anywhere in the dashboard - a fully
+  wired feature with zero UI visibility, found during a cleanup pass.
+  Sidebar now shows an "actuation" row (hidden unless `actuate=true` in
+  observe mode) with the last write's outcome or the reason it was
+  refused.
+
+### Documentation
+
+- Noted a real drift between `sample-workload/k8s/service.yaml`
+  (`ClusterIP`) and the actual live demo cluster (`LoadBalancer`, patched
+  live for a stable metrics/trigger address) so a future `kubectl apply`
+  doesn't silently break connectivity; same note for the HPA (deleted
+  live to unblock actuation).
+- Documented `SIM_TICK_SECONDS`/`LOG_LEVEL`, read by
+  `sample-workload/app/main.py` but previously undocumented.
+
 ## [0.5.3]
 
 ### Changed

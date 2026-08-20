@@ -213,7 +213,9 @@ ScaleScope be the sole controller.
 `GET /api/source` also reports actuation state: `actuate`,
 `last_actuation_ts`, `last_actuation_replicas`, and
 `last_actuation_error` (populated whether the failure was an HPA conflict
-or an API error, so "why didn't it scale" is never a silent question).
+or an API error, so "why didn't it scale" is never a silent question) -
+the dashboard sidebar shows this as an "actuation" row whenever
+`actuate=true` in observe mode.
 
 ### sample-workload/
 

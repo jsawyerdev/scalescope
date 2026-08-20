@@ -7,6 +7,10 @@ ScaleScope's OBSERVE mode) to actually scale in response to.
 Independent of the ScaleScope app itself (`src/scalescope/`): no shared code,
 config, or image.
 
+Environment variables (none set in `k8s/deployment.yaml` - all default):
+`SIM_TICK_SECONDS` (default `1.0`, seconds between background-simulator
+ticks) and `LOG_LEVEL` (default `INFO`).
+
 ## What it does
 
 `app/main.py` is a small FastAPI app that generates its own load - no
@@ -91,6 +95,17 @@ own recommendations later.
 Requires a metrics-server (or equivalent) in the cluster for the HPA to read
 CPU utilization; most clusters, including a standard Talos setup, already
 run one.
+
+**Live-cluster drift note**: the demo cluster this repo was built against
+currently differs from a fresh `kubectl apply` of these manifests - the
+Service was patched to `LoadBalancer` (`kubectl patch svc sample-workload
+-n scalescope-demo -p '{"spec":{"type":"LoadBalancer"}}'`) for a stable
+metrics/`/trigger` address instead of a fragile `kubectl port-forward`,
+and the HPA was deleted (`kubectl delete hpa sample-workload -n
+scalescope-demo`) so ScaleScope's actuator isn't refused by the
+HPA-conflict check - see the main README's "Actuation" section. A fresh
+`kubectl apply -f sample-workload/k8s/` restores `ClusterIP` and the HPA,
+which will then compete with actuation until the HPA is removed again.
 
 ## Watch it react
 

@@ -141,6 +141,27 @@ function renderSource(source) {
       errorBox.hidden = true;
     }
   }
+
+  const actuationItem = document.getElementById("actuation-item");
+  const actuationDot = document.getElementById("actuation-dot");
+  const actuationText = document.getElementById("actuation-text");
+  if (isObserve && source.actuate) {
+    actuationItem.hidden = false;
+    if (source.last_actuation_error) {
+      actuationDot.className = "dot bad";
+      actuationText.textContent = source.last_actuation_error;
+    } else if (source.last_actuation_ts) {
+      const ageS = Math.max(0, (Date.now() - parseTs(source.last_actuation_ts).getTime()) / 1000);
+      const { cls } = classifyFreshness(ageS);
+      actuationDot.className = `dot ${cls}`;
+      actuationText.textContent = `set replicas=${source.last_actuation_replicas} – ${Math.round(ageS)}s ago`;
+    } else {
+      actuationDot.className = "dot";
+      actuationText.textContent = "enabled – no action taken yet";
+    }
+  } else {
+    actuationItem.hidden = true;
+  }
 }
 
 function renderMetrics(latest) {
