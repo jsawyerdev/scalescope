@@ -59,7 +59,7 @@ def test_scale_ignores_hpa_targeting_a_different_deployment():
     actuator.scale("sample-workload", 5)
 
     mock_apps.patch_namespaced_deployment_scale.assert_called_once_with(
-        "sample-workload", "ns", body={"spec": {"replicas": 5}}
+        "sample-workload", "ns", body={"spec": {"replicas": 5}}, _request_timeout=10
     )
 
 
@@ -72,7 +72,7 @@ def test_scale_writes_when_no_hpa_present():
     actuator.scale("sample-workload", 7)
 
     mock_apps.patch_namespaced_deployment_scale.assert_called_once_with(
-        "sample-workload", "ns", body={"spec": {"replicas": 7}}
+        "sample-workload", "ns", body={"spec": {"replicas": 7}}, _request_timeout=10
     )
 
 

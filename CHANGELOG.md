@@ -4,6 +4,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.5.5]
+
+### Fixed
+
+- No Kubernetes API call anywhere in the codebase had an explicit timeout
+  configured - `kubernetes.client.Configuration.retries` is `None` and
+  there is no default socket timeout, confirmed by inspecting the
+  installed client at runtime. An unresponsive/partitioned API server
+  could hang the calling thread indefinitely. Added
+  `K8S_REQUEST_TIMEOUT_SECONDS = 10` in `k8s_collector.py`, passed via
+  `_request_timeout` to all 5 call sites across `k8s_collector.py` and
+  `k8s_actuator.py` (verified as a real, supported parameter on the
+  generated client methods, not guessed). Found during a structured
+  assurance review, not previously reported.
+
 ## [0.5.4]
 
 ### Fixed

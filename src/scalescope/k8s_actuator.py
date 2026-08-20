@@ -20,7 +20,7 @@ import logging
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 
-from scalescope.k8s_collector import load_k8s_config
+from scalescope.k8s_collector import K8S_REQUEST_TIMEOUT_SECONDS, load_k8s_config
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class KubernetesActuator:
     def _competing_hpa_name(self, deployment_name: str) -> str | None:
         try:
             hpas = self._autoscaling.list_namespaced_horizontal_pod_autoscaler(
-                self._namespace
+                self._namespace, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS
             ).items
         except ApiException as exc:
             raise ActuationError(
@@ -67,7 +67,10 @@ class KubernetesActuator:
 
         try:
             self._apps.patch_namespaced_deployment_scale(
-                deployment_name, self._namespace, body={"spec": {"replicas": replicas}}
+                deployment_name,
+                self._namespace,
+                body={"spec": {"replicas": replicas}},
+                _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
             )
         except ApiException as exc:
             raise ActuationError(

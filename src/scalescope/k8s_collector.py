@@ -31,6 +31,12 @@ from kubernetes.client.rest import ApiException
 
 logger = logging.getLogger(__name__)
 
+# The kubernetes client sets no timeout by default (Configuration.retries
+# is None, no socket timeout configured) - an unresponsive API server would
+# otherwise hang the calling thread indefinitely. Every API call in this
+# module and k8s_actuator.py passes this explicitly.
+K8S_REQUEST_TIMEOUT_SECONDS = 10
+
 _METRIC_LINE_RE = re.compile(
     r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{[^}]*\})?\s+([0-9.eE+\-]+|NaN|\+Inf|-Inf)\s*$"
 )
@@ -120,7 +126,9 @@ class KubernetesObservationCollector:
     def collect(self) -> dict:
         try:
             deployment = self._apps.read_namespaced_deployment(
-                self._deployment_name, self._namespace
+                self._deployment_name,
+                self._namespace,
+                _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
             )
         except ApiException as exc:
             raise KubernetesUnavailableError(
@@ -130,7 +138,9 @@ class KubernetesObservationCollector:
         match_labels = deployment.spec.selector.match_labels or {}
         label_selector = ",".join(f"{k}={v}" for k, v in match_labels.items())
         pods = self._core.list_namespaced_pod(
-            self._namespace, label_selector=label_selector
+            self._namespace,
+            label_selector=label_selector,
+            _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
         ).items
 
         pending_pods = sum(1 for p in pods if p.status.phase == "Pending")
@@ -182,7 +192,11 @@ class KubernetesObservationCollector:
 
         try:
             metrics = self._custom.list_namespaced_custom_object(
-                "metrics.k8s.io", "v1beta1", self._namespace, "pods"
+                "metrics.k8s.io",
+                "v1beta1",
+                self._namespace,
+                "pods",
+                _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
             )
         except ApiException:
             logger.warning(
