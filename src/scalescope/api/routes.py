@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import math
 import threading
 from importlib.metadata import version as _package_version
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -20,12 +23,97 @@ from scalescope.models.baselines import (
     NaiveModel,
     SeasonalNaiveModel,
 )
-from scalescope.models.lightgbm_model import LightGbmQuantileModel
+from scalescope.models.lightgbm_model import (
+    LightGbmHyperparameters,
+    LightGbmQuantileModel,
+)
 from scalescope.models.statsforecast_model import AutoEtsModel
 from scalescope.replay import replay_score
 from scalescope.storage import Store
 
 router = APIRouter(prefix="/api")
+
+
+_LIGHTGBM_INT_CONFIG_KEYS = frozenset(
+    {"n_estimators", "num_leaves", "min_child_samples"}
+)
+_LIGHTGBM_CONFIG_KEYS = _LIGHTGBM_INT_CONFIG_KEYS | {"learning_rate"}
+
+
+def _positive_int_lightgbm_config(raw_config: dict[Any, Any], key: str) -> int:
+    value = raw_config[key]
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise RuntimeError(
+            "SCALESCOPE_LIGHTGBM_CONFIG_PATH value for "
+            f"{key!r} must be a positive integer"
+        )
+    return value
+
+
+def _load_lightgbm_config(path: str | None) -> LightGbmHyperparameters:
+    if path is None:
+        return {}
+
+    config_path = Path(path)
+    try:
+        with config_path.open(encoding="utf-8") as f:
+            raw_config = json.load(f)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "SCALESCOPE_LIGHTGBM_CONFIG_PATH points to a missing file: "
+            f"{config_path}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "SCALESCOPE_LIGHTGBM_CONFIG_PATH must contain valid JSON: "
+            f"{config_path}: {exc}"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(
+            "SCALESCOPE_LIGHTGBM_CONFIG_PATH could not be read: " f"{config_path}"
+        ) from exc
+
+    if not isinstance(raw_config, dict):
+        raise TypeError(
+            "SCALESCOPE_LIGHTGBM_CONFIG_PATH must contain a JSON object of "
+            "LightGBM hyperparameters"
+        )
+
+    unknown_keys = sorted(set(raw_config) - _LIGHTGBM_CONFIG_KEYS)
+    if unknown_keys:
+        raise RuntimeError(
+            "SCALESCOPE_LIGHTGBM_CONFIG_PATH contains unsupported LightGBM "
+            f"hyperparameter(s): {unknown_keys}"
+        )
+
+    config: LightGbmHyperparameters = {}
+    if "n_estimators" in raw_config:
+        config["n_estimators"] = _positive_int_lightgbm_config(
+            raw_config, "n_estimators"
+        )
+    if "num_leaves" in raw_config:
+        config["num_leaves"] = _positive_int_lightgbm_config(raw_config, "num_leaves")
+    if "min_child_samples" in raw_config:
+        config["min_child_samples"] = _positive_int_lightgbm_config(
+            raw_config, "min_child_samples"
+        )
+
+    if "learning_rate" in raw_config:
+        value = raw_config["learning_rate"]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value <= 0
+        ):
+            raise RuntimeError(
+                "SCALESCOPE_LIGHTGBM_CONFIG_PATH value for 'learning_rate' "
+                "must be a positive finite number"
+            )
+        config["learning_rate"] = float(value)
+
+    return config
+
 
 _MODELS: dict[str, ForecastModel] = {
     "naive": NaiveModel(),
@@ -33,7 +121,9 @@ _MODELS: dict[str, ForecastModel] = {
     "ewma": EwmaModel(),
     "linear_trend": LinearTrendModel(),
     "auto_ets": AutoEtsModel(),
-    "lightgbm_quantile": LightGbmQuantileModel(),
+    "lightgbm_quantile": LightGbmQuantileModel(
+        **_load_lightgbm_config(settings.lightgbm_config_path)
+    ),
 }
 _DEFAULT_MODEL = "auto_ets"
 _HORIZON_STEPS = settings.forecast_horizon_steps

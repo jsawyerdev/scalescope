@@ -1,0 +1,2 @@
+smac==2.4.0
+scikit-learn<1.9

@@ -4,6 +4,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.9.0]
+
+### Added
+
+- LightGBM quantile forecasts can now consume an opt-in tuned hyperparameter
+  JSON file via `SCALESCOPE_LIGHTGBM_CONFIG_PATH`, with strict startup
+  validation for missing, malformed, or unsupported config values.
+- Added `scripts/tune/`, an operator-run SMAC3 tuning lab that minimizes the
+  existing replay-lab MAE against recorded workload history and writes the
+  winning LightGBM config. `smac` is deliberately not a project dependency:
+  it lives only in an isolated tuning venv with `scikit-learn<1.9` (SMAC's
+  RandomForest surrogate imports `sklearn.tree._tree.DTYPE`, a private
+  internal removed in scikit-learn 1.9.0, which the app needs via
+  `mlforecast` - confirmed by a real install attempt, not assumed), outside
+  the FastAPI runtime and Docker image.
+- Verified live: built the isolated tuning venv for real and ran 30 SMAC
+  trials against 5000 real observations copied from the running DEMO
+  container (`payments-api`) - default hardcoded hyperparameters scored
+  127.27 MAE via the replay lab, the SMAC incumbent found 126.34 (a modest,
+  real ~0.7% improvement, not a fabricated headline number). Confirmed the
+  opt-in config actually overrides the model's hyperparameters
+  (`n_estimators`/`num_leaves`/`min_child_samples`/`learning_rate` =
+  193/60/18/0.019 vs the unset-env-var default of 100/15/5/None) by
+  constructing `_MODELS` with and without `SCALESCOPE_LIGHTGBM_CONFIG_PATH`
+  set and comparing directly, and by running it end-to-end in a throwaway
+  container.
+
 ## [0.8.0]
 
 ### Added

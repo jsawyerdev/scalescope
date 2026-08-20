@@ -30,27 +30,65 @@ def test_auto_ets_keeps_season_length_one_without_detected_period(
 def test_lightgbm_appends_detected_period_lag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured = _install_lightgbm_fakes(monkeypatch)
+    captured_lags, _ = _install_lightgbm_fakes(monkeypatch)
     monkeypatch.setattr(lightgbm_model, "detect_period", lambda history: 50)
 
     lightgbm_model.LightGbmQuantileModel().predict(
         np.arange(120, dtype=float), horizon=3
     )
 
-    assert captured == [[1, 2, 3, 5, 10, 50]] * 3
+    assert captured_lags == [[1, 2, 3, 5, 10, 50]] * 3
 
 
 def test_lightgbm_keeps_base_lags_without_detected_period(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured = _install_lightgbm_fakes(monkeypatch)
+    captured_lags, _ = _install_lightgbm_fakes(monkeypatch)
     monkeypatch.setattr(lightgbm_model, "detect_period", lambda history: 1)
 
     lightgbm_model.LightGbmQuantileModel().predict(
         np.arange(120, dtype=float), horizon=3
     )
 
-    assert captured == [[1, 2, 3, 5, 10]] * 3
+    assert captured_lags == [[1, 2, 3, 5, 10]] * 3
+
+
+def test_lightgbm_default_regressor_kwargs_match_previous_hardcoded_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, captured_kwargs = _install_lightgbm_fakes(monkeypatch)
+    monkeypatch.setattr(lightgbm_model, "detect_period", lambda history: 1)
+
+    lightgbm_model.LightGbmQuantileModel().predict(
+        np.arange(120, dtype=float), horizon=3
+    )
+
+    assert captured_kwargs == [
+        {
+            "objective": "quantile",
+            "alpha": 0.10,
+            "n_estimators": 100,
+            "num_leaves": 15,
+            "min_child_samples": 5,
+            "verbosity": -1,
+        },
+        {
+            "objective": "quantile",
+            "alpha": 0.50,
+            "n_estimators": 100,
+            "num_leaves": 15,
+            "min_child_samples": 5,
+            "verbosity": -1,
+        },
+        {
+            "objective": "quantile",
+            "alpha": 0.90,
+            "n_estimators": 100,
+            "num_leaves": 15,
+            "min_child_samples": 5,
+            "verbosity": -1,
+        },
+    ]
 
 
 def _install_auto_ets_fakes(monkeypatch: pytest.MonkeyPatch) -> list[int]:
@@ -78,12 +116,15 @@ def _install_auto_ets_fakes(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     return captured
 
 
-def _install_lightgbm_fakes(monkeypatch: pytest.MonkeyPatch) -> list[list[int]]:
-    captured: list[list[int]] = []
+def _install_lightgbm_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[list[int]], list[dict[str, object]]]:
+    captured_lags: list[list[int]] = []
+    captured_kwargs: list[dict[str, object]] = []
 
     class FakeLGBMRegressor:
         def __init__(self, **kwargs: object) -> None:
-            pass
+            captured_kwargs.append(dict(kwargs))
 
     class FakeMLForecast:
         def __init__(
@@ -94,7 +135,7 @@ def _install_lightgbm_fakes(monkeypatch: pytest.MonkeyPatch) -> list[list[int]]:
             lag_transforms: dict[int, list[object]],
         ) -> None:
             self._label = next(iter(models))
-            captured.append(list(lags))
+            captured_lags.append(list(lags))
 
         def fit(self, df: pd.DataFrame) -> None:
             pass
@@ -104,4 +145,4 @@ def _install_lightgbm_fakes(monkeypatch: pytest.MonkeyPatch) -> list[list[int]]:
 
     monkeypatch.setattr(lightgbm_model.lgb, "LGBMRegressor", FakeLGBMRegressor)
     monkeypatch.setattr(lightgbm_model, "MLForecast", FakeMLForecast)
-    return captured
+    return captured_lags, captured_kwargs

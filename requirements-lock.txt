@@ -37,7 +37,7 @@ mlforecast==1.1.0
 multidict==6.7.1
 mypy==2.3.1
 mypy_extensions==1.1.0
-narwhals==2.24.0
+narwhals==2.25.0
 numpy==2.5.2
 oauthlib==3.3.1
 optuna==4.9.0
@@ -62,7 +62,7 @@ pytz==2026.3.post1
 PyYAML==6.0.3
 requests==2.34.2
 requests-oauthlib==2.0.0
-ruff==0.16.3
+ruff==0.16.4
 scikit-learn==1.9.0
 scipy==1.18.0
 six==1.17.0

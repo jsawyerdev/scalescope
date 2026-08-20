@@ -17,6 +17,7 @@ class Settings:
     )
     forecast_horizon_steps: int = int(os.environ.get("SCALESCOPE_HORIZON_STEPS", "30"))
     history_window_steps: int = int(os.environ.get("SCALESCOPE_HISTORY_STEPS", "600"))
+    lightgbm_config_path: str | None = os.environ.get("SCALESCOPE_LIGHTGBM_CONFIG_PATH")
     log_level: str = os.environ.get("SCALESCOPE_LOG_LEVEL", "INFO")
     k8s_namespace: str = os.environ.get("SCALESCOPE_K8S_NAMESPACE", "scalescope-demo")
     k8s_deployment: str = os.environ.get("SCALESCOPE_K8S_DEPLOYMENT", "sample-workload")

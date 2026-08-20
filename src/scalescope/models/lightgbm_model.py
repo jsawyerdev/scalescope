@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import TypedDict
 
 import lightgbm as lgb
 import numpy as np
@@ -21,10 +22,31 @@ _QUANTILES = {"p10": 0.10, "p50": 0.50, "p90": 0.90}
 _BASE_LAGS = [1, 2, 3, 5, 10]
 
 
+class LightGbmHyperparameters(TypedDict, total=False):
+    """Constructor parameters operators may tune offline."""
+
+    n_estimators: int
+    num_leaves: int
+    min_child_samples: int
+    learning_rate: float
+
+
 class LightGbmQuantileModel:
     """Lag/rolling-feature LightGBM quantile regressor, one model per quantile."""
 
     name = "lightgbm_quantile"
+
+    def __init__(
+        self,
+        n_estimators: int = 100,
+        num_leaves: int = 15,
+        min_child_samples: int = 5,
+        learning_rate: float | None = None,
+    ) -> None:
+        self.n_estimators = n_estimators
+        self.num_leaves = num_leaves
+        self.min_child_samples = min_child_samples
+        self.learning_rate = learning_rate
 
     def predict(self, history: np.ndarray, horizon: int) -> Forecast:
         if len(history) < _MIN_HISTORY:
@@ -50,14 +72,25 @@ class LightGbmQuantileModel:
 
             quantile_forecasts: dict[str, np.ndarray] = {}
             for label, alpha in _QUANTILES.items():
-                model = lgb.LGBMRegressor(
-                    objective="quantile",
-                    alpha=alpha,
-                    n_estimators=100,
-                    num_leaves=15,
-                    min_child_samples=5,
-                    verbosity=-1,
-                )
+                if self.learning_rate is not None:
+                    model = lgb.LGBMRegressor(
+                        objective="quantile",
+                        alpha=alpha,
+                        n_estimators=self.n_estimators,
+                        num_leaves=self.num_leaves,
+                        min_child_samples=self.min_child_samples,
+                        verbosity=-1,
+                        learning_rate=self.learning_rate,
+                    )
+                else:
+                    model = lgb.LGBMRegressor(
+                        objective="quantile",
+                        alpha=alpha,
+                        n_estimators=self.n_estimators,
+                        num_leaves=self.num_leaves,
+                        min_child_samples=self.min_child_samples,
+                        verbosity=-1,
+                    )
                 mlf = MLForecast(
                     models={label: model},
                     freq=1,

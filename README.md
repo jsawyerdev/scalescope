@@ -115,6 +115,10 @@ history and returns all six recommendations side by side, so the dashboard can c
 of committing to one model's output blind. `GET /api/workloads/{name}/recommendation` (singular)
 still exists for a single `model=` choice.
 
+Operator-run SMAC3 tuning for `lightgbm_quantile` lives in
+[`scripts/tune`](scripts/tune/README.md). It writes an opt-in JSON config for
+`SCALESCOPE_LIGHTGBM_CONFIG_PATH`; SMAC3 stays out of the app dependency set.
+
 ## Diagnosis logic
 
 `diagnosis.py`'s rule ladder, in the exact order `diagnose()` evaluates it. Every
@@ -208,6 +212,7 @@ Environment variables (see `src/scalescope/config.py`):
 | `SCALESCOPE_LOG_LEVEL` | `INFO` | Python logging level |
 | `SCALESCOPE_HORIZON_STEPS` | `30` | Forecast horizon, in ticks |
 | `SCALESCOPE_HISTORY_STEPS` | `600` | Observation history window fed to models |
+| `SCALESCOPE_LIGHTGBM_CONFIG_PATH` | unset | Optional LightGBM hyperparameter JSON produced by `scripts/tune` |
 | `SCALESCOPE_K8S_NAMESPACE` | `scalescope-demo` | Namespace to observe (observe mode only) |
 | `SCALESCOPE_K8S_DEPLOYMENT` | `sample-workload` | Deployment to observe (observe mode only) |
 | `SCALESCOPE_K8S_KUBECONFIG` | unset | Kubeconfig path; unset tries in-cluster config, then default kubeconfig discovery |
