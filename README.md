@@ -6,7 +6,9 @@ runs that alongside a deterministic diagnosis engine that flags when scaling is
 the wrong response (CPU limit throttling, memory leak, node capacity exhaustion,
 HPA ceiling, non-CPU bottleneck).
 
-## Status: v0.2 (demo + observe modes)
+## Status: v0.3 (demo + observe modes, verified against a real cluster)
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed at each version.
 
 This is a scaffold, not a finished product. Two ways to run it:
 
@@ -27,26 +29,42 @@ KEDA-based actuation are on the roadmap and not implemented yet — see
 
 ## Architecture
 
-```
-simulator.py        synthetic workload (reactive-HPA-controlled, fault injection)
-        |
-        v
-   storage.py        DuckDB: observations / forecasts / recommendations
-        |
-        v
-  models/*.py         ForecastModel plugins, common Forecast(p10,p50,p90) interface
-        |              - baselines: naive, seasonal_naive, ewma, linear_trend
-        |              - auto_ets: Nixtla StatsForecast AutoETS
-        |              - lightgbm_quantile: MLForecast + LightGBM quantile regression
-        v
-  capacity.py         forecast -> required replicas, rate-limited step, confidence
-  diagnosis.py         deterministic rule engine (never calls a model)
-        |
-        v
-   api/routes.py      FastAPI REST endpoints
-        |
-        v
-   static/            vanilla HTML/CSS/JS dashboard (Chart.js via CDN, no build step)
+```mermaid
+flowchart TB
+    subgraph DEMO["DEMO mode"]
+        SIM["simulator.py<br/>reactive-HPA-controlled synthetic workload,<br/>fault injection"]
+    end
+
+    subgraph CLUSTER["Real Kubernetes cluster (OBSERVE mode)"]
+        DEPLOY["Deployment / Pods"]
+        METRICSRV["metrics-server"]
+        WORKLOAD["sample-workload/<br/>self-load test app"]
+        DEPLOY -.->|scales| WORKLOAD
+    end
+
+    subgraph SCALESCOPE["ScaleScope process"]
+        COLLECTOR["k8s_collector.py<br/>read-only, least-privilege RBAC"]
+        STORE[("storage.py<br/>DuckDB")]
+        MODELS["models/*.py<br/>naive · seasonal_naive · ewma · linear_trend<br/>auto_ets (StatsForecast) · lightgbm_quantile"]
+        CAPACITY["capacity.py<br/>forecast to required replicas"]
+        DIAGNOSIS["diagnosis.py<br/>deterministic rule engine,<br/>never calls a model"]
+        API["api/routes.py<br/>FastAPI"]
+        UI["static/<br/>dashboard, no build step"]
+    end
+
+    SIM -->|insert_observation| STORE
+    DEPLOY -->|get/list/watch| COLLECTOR
+    METRICSRV -->|get/list| COLLECTOR
+    WORKLOAD -->|scrape /metrics| COLLECTOR
+    COLLECTOR -->|insert_observation| STORE
+
+    STORE --> MODELS
+    STORE --> DIAGNOSIS
+    MODELS --> CAPACITY
+    CAPACITY --> API
+    DIAGNOSIS --> API
+    STORE --> API
+    API --> UI
 ```
 
 The forecaster never predicts CPU-per-pod directly, because scaling changes

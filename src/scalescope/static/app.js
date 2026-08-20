@@ -101,6 +101,7 @@ function renderSource(source) {
   const connDot = document.getElementById("source-conn-dot");
   const connText = document.getElementById("source-conn-text");
   const errorBox = document.getElementById("source-error");
+  document.getElementById("version-text").textContent = `ScaleScope v${source.version}`;
 
   const isObserve = source.mode === "observe";
   modeBadge.textContent = isObserve ? "OBSERVE" : "DEMO";
