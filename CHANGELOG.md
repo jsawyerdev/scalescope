@@ -13,6 +13,10 @@ Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
   to StatsForecast, and LightGBM adds the detected period as a lag feature
   when the history supports it. Histories without a confident ACF peak keep
   the previous no-seasonality behavior.
+- sample-workload now supports an OBSERVE-only `stress` trigger that
+  saturates available CPU cores with bounded multiprocessing Pi
+  computation, while keeping the FastAPI event loop responsive and ending
+  the worker processes at `duration_seconds`.
 
 ## [0.7.1]
 

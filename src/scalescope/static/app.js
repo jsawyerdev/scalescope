@@ -43,6 +43,7 @@ let chart = null;
 let pollTimer = null;
 let allModelForecasts = {};
 let lastMultiModelFetchAt = 0;
+let sourceMode = null;
 
 const workloadSelect = document.getElementById("workload-select");
 const fetchError = document.getElementById("fetch-error");
@@ -124,6 +125,7 @@ function renderSource(source) {
   document.getElementById("version-text").textContent = `ScaleScope v${source.version}`;
 
   const isObserve = source.mode === "observe";
+  sourceMode = source.mode;
   modeBadge.textContent = isObserve ? "OBSERVE" : "DEMO";
   modeBadge.className = isObserve ? "badge mode" : "badge mode demo";
 
@@ -400,14 +402,24 @@ async function refresh() {
 }
 
 const TRIGGER_DURATION_SECONDS = 45;
+const TRIGGER_LABELS = {
+  cpu: "CPU spike",
+  memory: "memory leak",
+  traffic: "traffic spike",
+  stress: "CPU stress",
+};
 
 function wireTriggerButtons() {
   const buttons = document.querySelectorAll(".trigger-btn");
   const status = document.getElementById("trigger-status");
   let countdownTimer = null;
 
+  function isAvailable(btn) {
+    return btn.dataset.kind !== "stress" || sourceMode === "observe";
+  }
+
   function setBusy(busy) {
-    buttons.forEach((btn) => (btn.disabled = busy));
+    buttons.forEach((btn) => (btn.disabled = busy || !isAvailable(btn)));
   }
 
   function startCountdown(kind, endsAt) {
@@ -421,16 +433,17 @@ function wireTriggerButtons() {
         setBusy(false);
         return;
       }
-      status.textContent = `${kind} spike active – ${remaining}s remaining`;
+      status.textContent = `${TRIGGER_LABELS[kind] || kind} active – ${remaining}s remaining`;
     }, 1000);
   }
 
+  setBusy(false);
   buttons.forEach((btn) => {
     btn.addEventListener("click", async () => {
       if (!currentWorkload) return;
       setBusy(true);
       status.classList.add("active");
-      status.textContent = `triggering ${btn.dataset.kind}…`;
+      status.textContent = `triggering ${TRIGGER_LABELS[btn.dataset.kind] || btn.dataset.kind}…`;
       try {
         await postJson(
           `/api/workloads/${currentWorkload}/trigger?kind=${btn.dataset.kind}&duration_seconds=${TRIGGER_DURATION_SECONDS}`

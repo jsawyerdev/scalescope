@@ -407,11 +407,15 @@ sequenceDiagram
     participant Sim as WorkloadSimulator (DEMO)
     participant WL as sample-workload's own<br/>POST /trigger (OBSERVE)
 
-    UI->>API: kind={cpu|memory|traffic}, duration_seconds=45
+    UI->>API: kind={cpu|memory|traffic|stress}, duration_seconds=45
     alt SCALESCOPE_MODE=demo
+        alt kind=stress
+            API-->>UI: 501 stress trigger is OBSERVE-only
+        else cpu/memory/traffic
         API->>Sim: trigger_fault(fault, duration_ticks)
         Sim-->>API: fault now active
         API-->>UI: 200 {target: "demo simulator"}
+        end
     else SCALESCOPE_MODE=observe
         API->>WL: POST base_url/trigger?kind&duration_seconds<br/>(httpx, 5s timeout)
         alt workload unreachable / SCALESCOPE_K8S_METRICS_URL unset
@@ -425,9 +429,12 @@ sequenceDiagram
     UI->>UI: local countdown timer for duration_seconds
 ```
 
-`base_url` is derived from `SCALESCOPE_K8S_METRICS_URL` (its `/metrics`
-suffix stripped) — ScaleScope has no other route to the workload's process,
-so OBSERVE-mode triggers require that variable to be set.
+`stress` is OBSERVE-only because it saturates real CPU cores inside
+sample-workload worker processes; the synthetic DEMO simulator has no
+equivalent process to stress. `base_url` is derived from
+`SCALESCOPE_K8S_METRICS_URL` (its `/metrics` suffix stripped) —
+ScaleScope has no other route to the workload's process, so OBSERVE-mode
+triggers require that variable to be set.
 
 ## API
 
@@ -443,9 +450,10 @@ so OBSERVE-mode triggers require that variable to be set.
   workload's recorded history (MAE/MAPE, sorted best first) — what the
   dashboard's "Replay lab" panel calls on demand
 - `GET /api/source` — what this instance is actually observing (mode, cluster, connection status)
-- `POST /api/workloads/{name}/trigger?kind={cpu|memory|traffic}&duration_seconds=45` — force a load
+- `POST /api/workloads/{name}/trigger?kind={cpu|memory|traffic|stress}&duration_seconds=45` — force a load
   pattern now (DEMO: the local simulator; OBSERVE: proxied to the real workload's own `/trigger`,
-  requires `SCALESCOPE_K8S_METRICS_URL`) — what the dashboard's "Generate load" buttons call
+  requires `SCALESCOPE_K8S_METRICS_URL`; `stress` is OBSERVE-only) — what the dashboard's
+  "Generate load" buttons call
 
 ## Develop locally
 

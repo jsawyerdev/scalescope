@@ -249,7 +249,7 @@ def get_replay(workload: str) -> dict[str, Any]:
     }
 
 
-_TRIGGER_KINDS = {"cpu", "memory", "traffic"}
+_TRIGGER_KINDS = {"cpu", "memory", "traffic", "stress"}
 _DEMO_FAULT_MAP = {
     "cpu": "cpu_limit",
     "memory": "memory_leak",
@@ -275,6 +275,12 @@ def trigger_fault(
         )
 
     if settings.mode == "demo":
+        if kind == "stress":
+            raise HTTPException(
+                status_code=501,
+                detail="stress trigger is only supported in OBSERVE mode",
+            )
+
         from scalescope.main import app_state
 
         simulator = app_state.get("simulator")
