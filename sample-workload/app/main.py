@@ -97,7 +97,7 @@ class _LoadPhase:
     def __init__(
         self,
         name: str,
-        duration_s: tuple[float, float],
+        duration_s: float,
         demand_rps: tuple[float, float],
         error_rate: float,
         leak_bytes_per_tick: int,
@@ -109,16 +109,26 @@ class _LoadPhase:
         self.leak_bytes_per_tick = leak_bytes_per_tick
 
 
-# Randomized phase cycle: mostly healthy, occasionally a fault shape that
-# ScaleScope's diagnosis engine (or a human) should recognize.
-_PHASES = [
-    _LoadPhase("idle", (10, 30), (2, 8), 0.0, 0),
-    _LoadPhase("moderate", (20, 60), (10, 30), 0.0, 0),
-    _LoadPhase("traffic_spike", (10, 25), (60, 120), 0.01, 0),
-    _LoadPhase("memory_leak", (30, 90), (10, 25), 0.0, 200_000),
-    _LoadPhase("error_burst", (10, 20), (15, 35), 0.35, 0),
+# Fixed-duration timeline, selected from wall-clock time rather than each
+# replica's own random.Random(). With N independent replicas each picking
+# random phases/durations, the cross-replica AVERAGE CPU (what the HPA and
+# ScaleScope actually observe) barely moves - by the law of large numbers,
+# independent per-pod randomness averages out to a near-constant medium
+# load, which never triggers a real scale-down. Every replica computing the
+# same phase from the same clock makes the whole workload move together, so
+# it actually contains distinct low periods to scale down into.
+_TIMELINE = [
+    _LoadPhase("idle", 60, (2, 8), 0.0, 0),
+    _LoadPhase("moderate", 45, (10, 25), 0.0, 0),
+    _LoadPhase("traffic_spike", 30, (60, 100), 0.01, 0),
+    _LoadPhase("moderate", 30, (10, 25), 0.0, 0),
+    _LoadPhase("idle", 45, (2, 8), 0.0, 0),
+    _LoadPhase("memory_leak", 60, (10, 20), 0.0, 300_000),
+    _LoadPhase("idle", 40, (2, 8), 0.0, 0),
+    _LoadPhase("error_burst", 20, (15, 30), 0.35, 0),
+    _LoadPhase("idle", 50, (2, 8), 0.0, 0),
 ]
-_PHASE_WEIGHTS = [0.45, 0.30, 0.10, 0.08, 0.07]
+_TIMELINE_TOTAL_SECONDS = sum(phase.duration_s for phase in _TIMELINE)
 
 # Container memory limit is 128Mi (see k8s/deployment.yaml); cap simulated
 # leak growth below that so the demo shows a climbing-memory anomaly for the
@@ -126,46 +136,51 @@ _PHASE_WEIGHTS = [0.45, 0.30, 0.10, 0.08, 0.07]
 _LEAK_CAP_BYTES = 90 * 1024 * 1024
 
 
+def _current_phase(now: float) -> _LoadPhase:
+    position = now % _TIMELINE_TOTAL_SECONDS
+    for phase in _TIMELINE:
+        if position < phase.duration_s:
+            return phase
+        position -= phase.duration_s
+    return _TIMELINE[0]
+
+
 async def _load_simulator() -> None:
     rng = random.Random()
+    last_phase_name: str | None = None
     while True:
-        phase = rng.choices(_PHASES, weights=_PHASE_WEIGHTS, k=1)[0]
-        duration = rng.uniform(*phase.duration_s)
-        logger.info("phase=%s duration=%.0fs", phase.name, duration)
-        SIMULATED_FAULT.set(0.0 if phase.name in ("idle", "moderate") else 1.0)
-
-        elapsed = 0.0
-        while elapsed < duration:
-            demand = rng.uniform(*phase.demand_rps)
-            DEMAND_RPS.set(demand)
-
-            iterations = int(demand * 4_000)
-            start = time.monotonic()
-            await asyncio.to_thread(_burn_cpu, max(iterations, 1_000))
-            latency_ms = (time.monotonic() - start) * 1000
-            is_error = rng.random() < phase.error_rate
-            _record_outcome(latency_ms, is_error)
-            REQUEST_COUNT.labels(
-                path="/internal-load", status="500" if is_error else "200"
-            ).inc()
-
-            if phase.leak_bytes_per_tick:
-                grow = min(
-                    phase.leak_bytes_per_tick, _LEAK_CAP_BYTES - len(_leak_buffer)
+        phase = _current_phase(time.time())
+        if phase.name != last_phase_name:
+            logger.info("phase=%s", phase.name)
+            SIMULATED_FAULT.set(0.0 if phase.name in ("idle", "moderate") else 1.0)
+            if last_phase_name == "memory_leak" and _leak_buffer:
+                logger.info(
+                    "memory_leak phase ended, releasing %d bytes", len(_leak_buffer)
                 )
-                if grow > 0:
-                    _leak_buffer.extend(b"x" * grow)
-                MEMORY_LEAK_BYTES.set(len(_leak_buffer))
+                _leak_buffer.clear()
+                MEMORY_LEAK_BYTES.set(0)
+            last_phase_name = phase.name
 
-            await asyncio.sleep(_TICK_SECONDS)
-            elapsed += _TICK_SECONDS
+        demand = rng.uniform(*phase.demand_rps)
+        DEMAND_RPS.set(demand)
 
-        if phase.name == "memory_leak" and _leak_buffer:
-            logger.info(
-                "memory_leak phase ended, releasing %d bytes", len(_leak_buffer)
-            )
-            _leak_buffer.clear()
-            MEMORY_LEAK_BYTES.set(0)
+        iterations = int(demand * 4_000)
+        start = time.monotonic()
+        await asyncio.to_thread(_burn_cpu, max(iterations, 1_000))
+        latency_ms = (time.monotonic() - start) * 1000
+        is_error = rng.random() < phase.error_rate
+        _record_outcome(latency_ms, is_error)
+        REQUEST_COUNT.labels(
+            path="/internal-load", status="500" if is_error else "200"
+        ).inc()
+
+        if phase.leak_bytes_per_tick:
+            grow = min(phase.leak_bytes_per_tick, _LEAK_CAP_BYTES - len(_leak_buffer))
+            if grow > 0:
+                _leak_buffer.extend(b"x" * grow)
+            MEMORY_LEAK_BYTES.set(len(_leak_buffer))
+
+        await asyncio.sleep(_TICK_SECONDS)
 
 
 @asynccontextmanager

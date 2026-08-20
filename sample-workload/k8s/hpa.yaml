@@ -16,10 +16,11 @@ spec:
         name: cpu
         target:
           type: Utilization
-          # % of the container's CPU *limit* (200m) - sustained /work load
-          # should push utilization past this and trigger scale-out, giving
-          # a real HPA baseline to compare against ScaleScope's own
-          # recommendations.
+          # HPA Resource/Utilization is always computed against the
+          # container's CPU *request* (100m, see deployment.yaml), never
+          # the limit - sustained load pushes usage past 60m and triggers
+          # scale-out, giving a real HPA baseline to compare against
+          # ScaleScope's own recommendations.
           averageUtilization: 60
   behavior:
     scaleDown:
