@@ -10,7 +10,9 @@ _MIN_HISTORY = 8
 _SEASONAL_PERIOD = 150  # half of the simulator's ~300-tick daily cycle
 
 
-def _spread(point: np.ndarray, residual_std: float) -> Forecast:
+def _spread(
+    point: np.ndarray, residual_std: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     widen = 1 + np.arange(len(point)) * 0.05
     band = 1.2816 * residual_std * widen  # ~80% interval
     return point, np.maximum(point - band, 0), np.maximum(point + band, 0)

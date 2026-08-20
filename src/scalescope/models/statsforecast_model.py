@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 import numpy as np
+import pandas as pd
 import polars as pl
 from statsforecast import StatsForecast
 from statsforecast.models import AutoETS
@@ -43,6 +44,10 @@ class AutoEtsModel:
             logger.exception("AutoETS failed, falling back to naive")
             return NaiveModel().predict(history, horizon)
 
+        # StatsForecast.forecast() is typed to return pandas.DataFrame |
+        # polars.DataFrame depending on the input frame type; we always pass
+        # a pandas frame (df.to_pandas() above), so the result is pandas.
+        assert isinstance(forecast_df, pd.DataFrame)
         point = forecast_df["AutoETS"].to_numpy()
         lo = forecast_df.get("AutoETS-lo-80", forecast_df["AutoETS"]).to_numpy()
         hi = forecast_df.get("AutoETS-hi-80", forecast_df["AutoETS"]).to_numpy()
