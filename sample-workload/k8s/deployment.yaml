@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-workload
+  namespace: scalescope-demo
+  labels:
+    app: sample-workload
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: sample-workload
+  template:
+    metadata:
+      labels:
+        app: sample-workload
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: sample-workload
+          # Placeholder image - build sample-workload/Dockerfile and push it
+          # to a registry this cluster can pull from, then update this
+          # reference (and imagePullPolicy below if not using :latest).
+          image: scalescope-sample-workload:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              # Deliberately tight relative to requests so sustained load
+              # against /work reaches the CPU limit and triggers real
+              # throttling - this is what lets ScaleScope's diagnosis engine
+              # (and a human) observe CPU-limit-throttling conditions rather
+              # than only clean scale-up behavior.
+              cpu: 200m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
