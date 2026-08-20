@@ -53,6 +53,7 @@ def _init_source_state() -> dict[str, Any]:
 
 async def _simulation_loop(store: Store) -> None:
     simulator = WorkloadSimulator()
+    app_state["simulator"] = simulator
     while True:
         row = simulator.step()
         store.insert_observation(row)

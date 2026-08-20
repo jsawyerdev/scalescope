@@ -52,6 +52,17 @@ class WorkloadSimulator:
         spike = 600 if self.state.active_fault == "traffic_spike" else 0
         return max(50.0, daily + noise + spike)
 
+    def _start_fault(self, fault: str, duration_ticks: int) -> None:
+        self.state.active_fault = fault
+        self.state.fault_ticks_remaining = duration_ticks
+        if fault == "memory_leak":
+            self.state.memory_leak_mb_per_tick = self.state.rng.uniform(0.5, 2.0)
+        elif fault == "cpu_limit":
+            self.state.cpu_limit_constrained = True
+        elif fault == "node_capacity":
+            self.state.node_capacity_constrained = True
+        logger.info("fault started: %s", fault)
+
     def _maybe_start_fault(self) -> None:
         if self.state.active_fault is not None:
             return
@@ -60,15 +71,20 @@ class WorkloadSimulator:
         fault = self.state.rng.choice(
             ["traffic_spike", "memory_leak", "cpu_limit", "node_capacity"]
         )
-        self.state.active_fault = fault
-        self.state.fault_ticks_remaining = self.state.rng.randint(60, 180)
-        if fault == "memory_leak":
-            self.state.memory_leak_mb_per_tick = self.state.rng.uniform(0.5, 2.0)
-        elif fault == "cpu_limit":
-            self.state.cpu_limit_constrained = True
-        elif fault == "node_capacity":
-            self.state.node_capacity_constrained = True
-        logger.info("fault started: %s", fault)
+        self._start_fault(fault, self.state.rng.randint(60, 180))
+
+    def trigger_fault(self, fault: str, duration_ticks: int = 60) -> None:
+        """Manually start `fault` now, overriding any fault already running.
+
+        `fault` must be one of traffic_spike/memory_leak/cpu_limit/node_capacity.
+        """
+        if fault not in ("traffic_spike", "memory_leak", "cpu_limit", "node_capacity"):
+            raise ValueError(f"unknown fault: {fault}")
+        self.state.active_fault = None
+        self.state.memory_leak_mb_per_tick = 0.0
+        self.state.cpu_limit_constrained = False
+        self.state.node_capacity_constrained = False
+        self._start_fault(fault, duration_ticks)
 
     def _maybe_end_fault(self) -> None:
         if self.state.active_fault is None:

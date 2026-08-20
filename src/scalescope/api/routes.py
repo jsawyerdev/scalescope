@@ -6,6 +6,7 @@ import threading
 from importlib.metadata import version as _package_version
 from typing import Any
 
+import httpx
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query
 
@@ -201,3 +202,79 @@ def get_all_recommendations(workload: str) -> dict[str, Any]:
             for model_name in _MODELS
         ],
     }
+
+
+_TRIGGER_KINDS = {"cpu", "memory", "traffic"}
+_DEMO_FAULT_MAP = {
+    "cpu": "cpu_limit",
+    "memory": "memory_leak",
+    "traffic": "traffic_spike",
+}
+
+
+@router.post("/workloads/{workload}/trigger")
+def trigger_fault(
+    workload: str, kind: str, duration_seconds: int = Query(default=45, ge=5, le=300)
+) -> dict[str, Any]:
+    """Force a load pattern now, so the effect is visible within a few ticks.
+
+    DEMO mode drives the local simulator directly. OBSERVE mode calls the
+    real workload's own /trigger endpoint (derived from
+    SCALESCOPE_K8S_METRICS_URL's base URL) - ScaleScope has no other route
+    to the workload's process.
+    """
+    if kind not in _TRIGGER_KINDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown kind: {kind} (expected one of {sorted(_TRIGGER_KINDS)})",
+        )
+
+    if settings.mode == "demo":
+        from scalescope.main import app_state
+
+        simulator = app_state.get("simulator")
+        if simulator is None:
+            raise HTTPException(status_code=503, detail="simulator not running yet")
+        duration_ticks = max(
+            1, round(duration_seconds / settings.simulation_tick_seconds)
+        )
+        simulator.trigger_fault(_DEMO_FAULT_MAP[kind], duration_ticks=duration_ticks)
+        return {
+            "workload": workload,
+            "kind": kind,
+            "duration_seconds": duration_seconds,
+            "target": "demo simulator",
+        }
+
+    if settings.mode == "observe":
+        if not settings.k8s_metrics_url:
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "SCALESCOPE_K8S_METRICS_URL is not configured; ScaleScope has no "
+                    "route to the workload to trigger a fault"
+                ),
+            )
+        base_url = settings.k8s_metrics_url.removesuffix("/metrics")
+        try:
+            response = httpx.post(
+                f"{base_url}/trigger",
+                params={"kind": kind, "duration_seconds": duration_seconds},
+                timeout=5.0,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502, detail=f"could not reach workload: {exc}"
+            ) from exc
+        return {
+            "workload": workload,
+            "kind": kind,
+            "duration_seconds": duration_seconds,
+            "target": base_url,
+            **response.json(),
+        }
+
+    raise HTTPException(
+        status_code=400, detail=f"trigger not supported in mode={settings.mode}"
+    )

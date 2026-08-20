@@ -30,6 +30,13 @@ Routes:
   OBSERVE-mode collector reads the first three when
   `SCALESCOPE_K8S_METRICS_URL` points here (see the main README's "Wiring
   in a real cluster" section).
+- `POST /trigger?kind={cpu|memory|traffic}&duration_seconds=45` - override
+  the background timeline for `duration_seconds`, forcing that load
+  pattern immediately. This is what ScaleScope's dashboard "Generate
+  load" buttons call in OBSERVE mode (proxied through
+  `POST /api/workloads/{name}/trigger` on the ScaleScope side); call it
+  directly here for a quick manual check without going through ScaleScope
+  at all: `curl -X POST 'http://<service-ip>/trigger?kind=cpu&duration_seconds=30'`.
 
 ## Build the image
 

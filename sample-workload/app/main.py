@@ -18,7 +18,7 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -135,8 +135,23 @@ _TIMELINE_TOTAL_SECONDS = sum(phase.duration_s for phase in _TIMELINE)
 # diagnosis engine to catch, without actually forcing an OOMKill.
 _LEAK_CAP_BYTES = 90 * 1024 * 1024
 
+_TRIGGER_PHASES = {
+    "cpu": _LoadPhase("manual_cpu_spike", 0, (150, 220), 0.0, 0),
+    "memory": _LoadPhase("manual_memory_leak", 0, (10, 20), 0.0, 400_000),
+    "traffic": _LoadPhase("manual_traffic_spike", 0, (80, 130), 0.02, 0),
+}
+
+_manual_override: _LoadPhase | None = None
+_manual_override_until: float = 0.0
+
 
 def _current_phase(now: float) -> _LoadPhase:
+    global _manual_override
+    if _manual_override is not None:
+        if now < _manual_override_until:
+            return _manual_override
+        _manual_override = None
+
     position = now % _TIMELINE_TOTAL_SECONDS
     for phase in _TIMELINE:
         if position < phase.duration_s:
@@ -226,3 +241,24 @@ def work(
     elapsed = time.monotonic() - start
     logger.debug("work request iterations=%d elapsed=%.4fs", iterations, elapsed)
     return {"iterations": iterations, "elapsed_seconds": elapsed, "digest": digest}
+
+
+@app.post("/trigger")
+def trigger(
+    kind: str, duration_seconds: int = Query(default=45, ge=5, le=300)
+) -> dict[str, object]:
+    """Force a named load pattern now, overriding the background timeline for `duration_seconds`."""
+    global _manual_override, _manual_override_until
+    if kind not in _TRIGGER_PHASES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown kind: {kind} (expected one of {sorted(_TRIGGER_PHASES)})",
+        )
+    _manual_override = _TRIGGER_PHASES[kind]
+    _manual_override_until = time.time() + duration_seconds
+    logger.info("manual trigger: kind=%s duration=%ds", kind, duration_seconds)
+    return {
+        "kind": kind,
+        "phase": _manual_override.name,
+        "duration_seconds": duration_seconds,
+    }
