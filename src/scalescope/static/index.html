@@ -130,6 +130,28 @@
     </div>
   </section>
 
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Replay lab</h2>
+      <span class="panel-note">backtests every model against this workload's real recorded history &mdash; measured error, not a stated preference</span>
+      <button id="replay-run-btn" class="trigger-btn">Run replay</button>
+    </div>
+    <div class="table-wrap">
+      <table id="replay-table">
+        <thead>
+          <tr>
+            <th>model</th>
+            <th class="num">anchors</th>
+            <th class="num">mean absolute error</th>
+            <th class="num">mean absolute % error</th>
+          </tr>
+        </thead>
+        <tbody id="replay-table-body"></tbody>
+      </table>
+    </div>
+    <span id="replay-status" class="trigger-status">&mdash;</span>
+  </section>
+
   <section class="panel chart-panel">
     <div class="panel-header">
       <h2>Forecast &mdash; <span id="chart-model-name">&mdash;</span></h2>

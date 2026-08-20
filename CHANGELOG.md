@@ -4,6 +4,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.6.0]
+
+### Added
+
+- **Replay lab**: `GET /api/workloads/{name}/replay` backtests every
+  registered model against the workload's own recorded history -
+  `src/scalescope/replay.py` trains each model only on data strictly
+  before a set of past anchor points and measures its forecast error
+  (MAE/MAPE) against what actually happened next, so "which model
+  performs best here" is a measurement over real stored data rather than
+  a stated preference. Dashboard gained a "Replay lab" panel with an
+  on-demand "Run replay" button (a full 6-model backtest pass takes ~2s
+  against 5000 rows of real history, too slow for the 3s poll cycle) and
+  a results table sorted by measured error.
+- Scope note: this backtests against the workload's own subsequent
+  observed values, not against a real Kubernetes HPA's decisions - the
+  original roadmap wording ("score ML recommendations against actual
+  Kubernetes HPA behavior") overstated the near-term scope; corrected in
+  the README roadmap section along with a stale KEDA bullet that no
+  longer reflects actuation as it was actually built (direct RBAC write,
+  not a KEDA external scaler).
+
 ## [0.5.5]
 
 ### Fixed

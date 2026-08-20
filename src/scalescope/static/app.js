@@ -429,6 +429,42 @@ function wireTriggerButtons() {
   });
 }
 
+// Replay is a full model-retrain pass over recorded history (~2s), so it
+// runs on demand rather than on the main 3s poll cycle.
+function renderReplay(result) {
+  const body = document.getElementById("replay-table-body");
+  body.innerHTML = result.scores
+    .map(
+      (s, i) => `
+        <tr class="${i === 0 ? "selected" : ""}">
+          <td class="model-name">${s.model}</td>
+          <td class="num">${s.n_anchors}</td>
+          <td class="num">${s.mean_absolute_error.toFixed(2)}</td>
+          <td class="num">${s.mean_absolute_pct_error.toFixed(1)}%</td>
+        </tr>`
+    )
+    .join("");
+}
+
+function wireReplayButton() {
+  const btn = document.getElementById("replay-run-btn");
+  const status = document.getElementById("replay-status");
+  btn.addEventListener("click", async () => {
+    if (!currentWorkload) return;
+    btn.disabled = true;
+    status.textContent = "backtesting every model against recorded history…";
+    try {
+      const result = await fetchJson(`/api/workloads/${currentWorkload}/replay`);
+      renderReplay(result);
+      status.textContent = `${result.n_observations} observations, ${result.scores.length} models scored`;
+    } catch (err) {
+      status.textContent = `replay failed: ${err.message}`;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
 async function loadWorkloads() {
   const workloads = await fetchJson("/api/workloads");
   if (workloads.length === 0) {
@@ -454,4 +490,5 @@ async function loadWorkloads() {
 }
 
 wireTriggerButtons();
+wireReplayButton();
 loadWorkloads();

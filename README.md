@@ -6,7 +6,7 @@ runs that alongside a deterministic diagnosis engine that flags when scaling is
 the wrong response (CPU limit throttling, memory leak, node capacity exhaustion,
 HPA ceiling, non-CPU bottleneck).
 
-## Status: v0.5 (demo + observe + opt-in actuation + on-demand load triggers, verified against a real cluster)
+## Status: v0.6 (demo + observe + opt-in actuation + on-demand load triggers + replay lab, verified against a real cluster)
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed at each version.
 
@@ -22,10 +22,9 @@ This is a scaffold, not a finished product. Two ways to run it:
   Prometheus gauges (not derivable from the Kubernetes API alone); without
   that they report as `0.0` rather than a fabricated value.
 
-The online-learning drift detector (River), foundation-model forecasters
-(Chronos-2/TimesFM via Darts), the model leaderboard, the replay lab, and
-KEDA-based actuation are on the roadmap and not implemented yet — see
-"Not yet built" below.
+The online-learning drift detector (River) and foundation-model forecasters
+(Chronos-2/TimesFM via Darts) are on the roadmap and not implemented yet —
+see "Not yet built" below.
 
 ## Architecture
 
@@ -236,6 +235,9 @@ See `sample-workload/README.md` for build/push/deploy instructions.
 - `GET /api/workloads/{name}/diagnosis`
 - `GET /api/workloads/{name}/recommendation?model=...`
 - `GET /api/workloads/{name}/recommendations` — all six models, side by side
+- `GET /api/workloads/{name}/replay` — backtests every model against this
+  workload's recorded history (MAE/MAPE, sorted best first) — what the
+  dashboard's "Replay lab" panel calls on demand
 - `GET /api/source` — what this instance is actually observing (mode, cluster, connection status)
 - `POST /api/workloads/{name}/trigger?kind={cpu|memory|traffic}&duration_seconds=45` — force a load
   pattern now (DEMO: the local simulator; OBSERVE: proxied to the real workload's own `/trigger`,
@@ -259,12 +261,18 @@ ruff check src tests
 - **OpenTelemetry ingestion** as an alternative to the per-workload
   Prometheus-gauge scrape convention `k8s_collector.py` currently uses.
 - **Online drift detection** (River) to gate forecast confidence on regime change.
-- **Foundation-model forecasters** (Chronos-2, TimesFM 2.5 via Darts) and a
-  model leaderboard scoring every model on rolling out-of-sample accuracy.
-- **Replay lab**: score ML recommendations against actual Kubernetes HPA
-  behavior over recorded incident windows.
-- **KEDA external-scaler integration** for shadow/control actuation modes
-  (this app should never write `spec.replicas` directly — it should emit a
-  metric KEDA/HPA consume, per the design doc).
+- **Foundation-model forecasters** (Chronos-2, TimesFM 2.5 via Darts).
+- **Replay lab vs. real HPA behavior**: the current replay lab
+  (`GET /api/workloads/{name}/replay`, see "API" below) backtests every
+  model against the workload's own subsequent recorded values (MAE/MAPE
+  per model) — it does not yet compare against what a real Kubernetes HPA
+  would have decided over the same recorded window, which is a separate,
+  unbuilt comparison.
+- **KEDA external-scaler integration** as an alternative actuation mode
+  (emit a metric for KEDA/HPA to consume, shadow-run alongside the direct
+  write). Not a correction of what's built today: actuation already
+  exists via direct RBAC write to `deployments/scale` with HPA-conflict
+  refusal (see "Actuation" below) — KEDA would be an additional mode, not
+  a replacement.
 - Multi-workload support (one workload at a time: one simulated series in
   DEMO mode, one Deployment in OBSERVE mode).

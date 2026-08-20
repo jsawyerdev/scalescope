@@ -22,6 +22,7 @@ from scalescope.models.baselines import (
 )
 from scalescope.models.lightgbm_model import LightGbmQuantileModel
 from scalescope.models.statsforecast_model import AutoEtsModel
+from scalescope.replay import replay_score
 from scalescope.storage import Store
 
 router = APIRouter(prefix="/api")
@@ -38,6 +39,10 @@ _DEFAULT_MODEL = "auto_ets"
 _HORIZON_STEPS = settings.forecast_horizon_steps
 _HISTORY_STEPS = settings.history_window_steps
 _MAX_OBSERVATIONS_LIMIT = 5000
+# The smallest per-model minimum history (baselines.py's NaiveModel); every
+# model falls back to a naive forecast below its own threshold, so this is
+# the only floor replay_score needs to produce a comparable anchor for all six.
+_REPLAY_MIN_HISTORY = 8
 _VERSION = _package_version("scalescope")
 
 # Keyed by (workload, model) -> (latest observation ts, Forecast). A fixed-size
@@ -201,6 +206,46 @@ def get_all_recommendations(workload: str) -> dict[str, Any]:
             _compute_recommendation(workload, model_name, df, diag)
             for model_name in _MODELS
         ],
+    }
+
+
+@router.get("/workloads/{workload}/replay")
+def get_replay(workload: str) -> dict[str, Any]:
+    """Backtest every model against this workload's real recorded history.
+
+    Measured MAE/MAPE per model, not a stated preference - answers "which
+    model actually performs best here" using only data available at each
+    backtest point, the same discipline the diagnosis engine applies to
+    scaling decisions.
+    """
+    store = get_store()
+    _require_known_workload(store, workload)
+    df = store.recent_observations(workload, _MAX_OBSERVATIONS_LIMIT)
+    if df.is_empty():
+        raise HTTPException(
+            status_code=409, detail=f"no observations yet for workload: {workload}"
+        )
+
+    history = df["request_rate"].to_numpy()
+    scores = replay_score(
+        history, _MODELS, min_history=_REPLAY_MIN_HISTORY, horizon=_HORIZON_STEPS
+    )
+    return {
+        "workload": workload,
+        "n_observations": len(history),
+        "horizon_steps": _HORIZON_STEPS,
+        "scores": sorted(
+            (
+                {
+                    "model": s.model_name,
+                    "n_anchors": s.n_anchors,
+                    "mean_absolute_error": s.mean_absolute_error,
+                    "mean_absolute_pct_error": s.mean_absolute_pct_error,
+                }
+                for s in scores
+            ),
+            key=lambda s: s["mean_absolute_error"],
+        ),
     }
 
 
