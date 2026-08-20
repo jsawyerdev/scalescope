@@ -1,22 +1,25 @@
+/* Palette matches services_to_deploy/consensus-trading-stack's dashboard
+   design tokens, so operator-facing tools in this environment share one
+   visual language instead of each reinventing blue/white. */
 :root {
-  --bg: #f4f6f9;
+  --bg: #f8fafc;
   --surface: #ffffff;
-  --surface-alt: #eef2f7;
-  --border: #cdd6e3;
-  --border-strong: #75839e;
-  --text: #16202e;
-  --text-muted: #52627a;
-  --text-faint: #8493a8;
-  --accent: #1a3e7c;
-  --accent-soft: #e4eaf7;
-  --good: #2e7d4f;
-  --good-soft: #e3f1e8;
-  --warn: #9a6a10;
-  --warn-soft: #f6ecd8;
-  --bad: #a53939;
-  --bad-soft: #f7e4e4;
-  --font-ui: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
-  --font-mono: "SF Mono", "Consolas", "Menlo", monospace;
+  --surface-alt: #f1f5f9;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --text: #111827;
+  --text-muted: #5f6672;
+  --text-faint: #7c8491;
+  --accent: #1d4ed8;
+  --accent-soft: #eff6ff;
+  --good: #2f9e73;
+  --good-soft: #ecfdf5;
+  --warn: #e98b2a;
+  --warn-soft: #fff7ed;
+  --bad: #dc2626;
+  --bad-soft: #fef2f2;
+  --font-ui: "Inter", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Consolas", "Menlo", monospace;
 }
 
 * { box-sizing: border-box; }
