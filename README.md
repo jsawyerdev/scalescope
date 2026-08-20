@@ -135,6 +135,7 @@ Environment variables (see `src/scalescope/config.py`):
 | `SCALESCOPE_K8S_DEPLOYMENT` | `sample-workload` | Deployment to observe (observe mode only) |
 | `SCALESCOPE_K8S_KUBECONFIG` | unset | Kubeconfig path; unset tries in-cluster config, then default kubeconfig discovery |
 | `SCALESCOPE_K8S_METRICS_URL` | unset | Workload's own `/metrics` URL, for real `request_rate`/`latency_p95_ms`/`error_rate` |
+| `SCALESCOPE_ACTUATE` | `false` | Observe mode only: actually write recommended replica counts to the cluster (see "Actuation" below) |
 
 To fully tear down and rebuild against the latest dependency versions
 `pyproject.toml` allows, run `./scripts/rebuild.sh`. It records the resolved
@@ -156,9 +157,13 @@ metrics.k8s.io PodMetrics if metrics-server is installed) — it never writes
 to the cluster. `k8s/rbac/` defines a least-privilege identity for this:
 
 1. `kubectl apply -f k8s/rbac/` — creates the `scalescope-demo` namespace, a
-   `scalescope-observer` ServiceAccount, a namespace-scoped Role (only the
-   read verbs above, no secrets access beyond its own token, nothing
-   cluster-scoped), and a durable token Secret for it.
+   `scalescope-actuator` ServiceAccount, a namespace-scoped Role (the read
+   verbs above, plus write access scoped to the `deployments/scale`
+   subresource only — never full deployments, so this identity can change a
+   replica count and nothing else about the workload — and read access to
+   `horizontalpodautoscalers` for the conflict check below; no secrets
+   access beyond its own token, nothing cluster-scoped), and a durable
+   token Secret for it.
 2. `./scripts/generate-observer-kubeconfig.sh` — renders a standalone
    kubeconfig for that ServiceAccount (`OUTPUT_PATH` env var to change where
    it's written; defaults to `./scalescope-observer.kubeconfig`). **This file
@@ -179,6 +184,31 @@ must say `no`.
 `GET /api/source` reports what a running instance is actually observing —
 mode, cluster server address, namespace/deployment, and live connection
 status — so DEMO and OBSERVE are never visually ambiguous in the dashboard.
+
+### Actuation: letting ScaleScope actually change replica counts
+
+`SCALESCOPE_MODE=observe` alone is always read-only. Setting
+`SCALESCOPE_ACTUATE=true` on top of it makes the observe loop, every tick,
+compute a recommendation and — only if the diagnosis engine says scaling
+will actually help — call `src/scalescope/k8s_actuator.py` to patch the
+target Deployment's `spec.replicas` via the `deployments/scale`
+subresource.
+
+**Before writing, it checks whether a `HorizontalPodAutoscaler` already
+targets the same Deployment, and refuses if one does.** Two controllers
+writing the same replica count fight each other: the HPA reconciles
+continuously and will simply overwrite ScaleScope's write within seconds,
+so the *only* safe default is refusing outright, not warning and
+proceeding. `sample-workload/k8s/hpa.yaml` installs a real HPA on the demo
+target by design (so there's a baseline to compare against) — actuation
+against it will therefore refuse until you remove that HPA
+(`kubectl delete hpa sample-workload -n scalescope-demo`) and let
+ScaleScope be the sole controller.
+
+`GET /api/source` also reports actuation state: `actuate`,
+`last_actuation_ts`, `last_actuation_replicas`, and
+`last_actuation_error` (populated whether the failure was an HPA conflict
+or an API error, so "why didn't it scale" is never a silent question).
 
 ### sample-workload/
 

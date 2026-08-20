@@ -1,7 +1,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: scalescope-observer-role
+  name: scalescope-actuator-role
   namespace: scalescope-demo
 rules:
   - apiGroups: ["apps"]
@@ -12,4 +12,17 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
+    verbs: ["get", "list"]
+  # Write surface for actuation (SCALESCOPE_ACTUATE=true only): scoped to
+  # the scale subresource, not full deployments, so this identity can
+  # change replica counts and nothing else about the workload (no image,
+  # env, volume, or spec changes).
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["patch", "update"]
+  # Read-only: k8s_actuator.py checks for a competing HorizontalPodAutoscaler
+  # before writing, since two controllers writing the same Deployment's
+  # replica count fight each other.
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
     verbs: ["get", "list"]

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Renders a standalone kubeconfig for the least-privilege scalescope-observer
+# Renders a standalone kubeconfig for the least-privilege scalescope-actuator
 # ServiceAccount (k8s/rbac/), so ScaleScope authenticates as that scoped
 # identity instead of whatever admin kubeconfig is on the operator's machine.
-# Requires k8s/rbac/*.yaml already applied. Uses only `kubectl get`/`config
-# view` (read-only against the cluster).
+# Requires k8s/rbac/*.yaml already applied. This script itself only reads
+# (`kubectl get`/`config view`) - it does not grant or change any permission,
+# only exports credentials for the identity k8s/rbac/role.yaml already
+# defines (read-only unless SCALESCOPE_ACTUATE=true is also set).
 set -euo pipefail
 
 NAMESPACE="scalescope-demo"
-SECRET_NAME="scalescope-observer-token"
+SECRET_NAME="scalescope-actuator-token"
 OUTPUT_PATH="${OUTPUT_PATH:-./scalescope-observer.kubeconfig}"
 
 SERVER_URL=$(kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')
@@ -36,14 +38,14 @@ clusters:
       server: ${SERVER_URL}
       certificate-authority-data: ${CA_DATA}
 contexts:
-  - name: scalescope-observer
+  - name: scalescope-actuator
     context:
       cluster: scalescope-demo
-      user: scalescope-observer
+      user: scalescope-actuator
       namespace: ${NAMESPACE}
-current-context: scalescope-observer
+current-context: scalescope-actuator
 users:
-  - name: scalescope-observer
+  - name: scalescope-actuator
     user:
       token: ${TOKEN}
 EOF
