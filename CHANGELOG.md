@@ -4,6 +4,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.5.2]
+
+### Changed
+
+- Palette switched from the 0.5.1 warm-off-white/indigo scheme to navy/
+  blue/orange/red - reuses the same verified color values as
+  services_to_deploy/consensus-trading-stack's dashboard (dark navy
+  sidebar `#102d5c`, blue accent `#2563eb`, orange warning `#e98b2a`, red
+  danger `#dc2626`) rather than a separately invented scheme. Sidebar is
+  now a solid dark navy panel with light text, distinct from the light
+  content area.
+- Tightened spacing throughout: smaller paddings/gaps in the sidebar,
+  panels, stat cards, and table cells; denser table rows; smaller chart
+  height (380px -> 300px) and log panel height (320px -> 260px); base
+  font size 14px -> 13px. Radii/shadows/type scale from 0.5.1 kept.
+
 ## [0.5.1]
 
 ### Changed
