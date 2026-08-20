@@ -64,6 +64,13 @@ Environment variables (see `src/scalescope/config.py`):
 | `SCALESCOPE_TICK_SECONDS` | `2.0` | Simulated seconds between observations |
 | `SCALESCOPE_DB_PATH` | `/data/scalescope.duckdb` | DuckDB file path |
 | `SCALESCOPE_LOG_LEVEL` | `INFO` | Python logging level |
+| `SCALESCOPE_HORIZON_STEPS` | `30` | Forecast horizon, in simulation ticks |
+| `SCALESCOPE_HISTORY_STEPS` | `600` | Observation history window fed to models |
+
+To rebuild against the latest dependency versions `pyproject.toml` allows and
+produce a fresh Docker image, run `./scripts/rebuild.sh`. It records the
+resolved package set to `requirements-lock.txt` and smoke-tests the built
+container before exiting 0.
 
 ## API
 
