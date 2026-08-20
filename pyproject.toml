@@ -1,6 +1,6 @@
 [project]
 name = "scalescope"
-version = "0.5.2"
+version = "0.5.3"
 description = "Explainable predictive Kubernetes capacity intelligence lab"
 requires-python = ">=3.13,<3.14"
 dependencies = [

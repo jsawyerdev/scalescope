@@ -4,6 +4,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.5.3]
+
+### Changed
+
+- `--radius-sm`/`--radius`/`--radius-lg` all set to `0`, plus the badge,
+  confidence-bar, and freshness-dot elements that had hardcoded `9999px`/
+  `50%` values outside those tokens - sharp corners everywhere, no pills,
+  no circles.
+
 ## [0.5.2]
 
 ### Changed
