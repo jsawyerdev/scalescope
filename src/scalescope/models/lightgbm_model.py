@@ -12,11 +12,13 @@ from mlforecast.lag_transforms import RollingMean, RollingStd
 
 from scalescope.models.base import Forecast
 from scalescope.models.baselines import NaiveModel
+from scalescope.models.seasonality import detect_period
 
 logger = logging.getLogger(__name__)
 
 _MIN_HISTORY = 60
 _QUANTILES = {"p10": 0.10, "p50": 0.50, "p90": 0.90}
+_BASE_LAGS = [1, 2, 3, 5, 10]
 
 
 class LightGbmQuantileModel:
@@ -37,6 +39,15 @@ class LightGbmQuantileModel:
         ).to_pandas()
 
         try:
+            season_length = detect_period(history)
+            lags = list(_BASE_LAGS)
+            if (
+                season_length > 1
+                and season_length < len(history)
+                and season_length not in lags
+            ):
+                lags.append(season_length)
+
             quantile_forecasts: dict[str, np.ndarray] = {}
             for label, alpha in _QUANTILES.items():
                 model = lgb.LGBMRegressor(
@@ -50,7 +61,7 @@ class LightGbmQuantileModel:
                 mlf = MLForecast(
                     models={label: model},
                     freq=1,
-                    lags=[1, 2, 3, 5, 10],
+                    lags=lags,
                     lag_transforms={
                         1: [RollingMean(window_size=5), RollingStd(window_size=5)],
                     },

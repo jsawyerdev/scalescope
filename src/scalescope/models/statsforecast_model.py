@@ -12,6 +12,7 @@ from statsforecast.models import AutoETS
 
 from scalescope.models.base import Forecast
 from scalescope.models.baselines import NaiveModel
+from scalescope.models.seasonality import detect_period
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,10 @@ class AutoEtsModel:
         )
 
         try:
-            sf = StatsForecast(models=[AutoETS(season_length=1)], freq=1, n_jobs=1)
+            season_length = detect_period(history)
+            sf = StatsForecast(
+                models=[AutoETS(season_length=season_length)], freq=1, n_jobs=1
+            )
             forecast_df = sf.forecast(df=df.to_pandas(), h=horizon, level=[80])
         except Exception:
             logger.exception("AutoETS failed, falling back to naive")

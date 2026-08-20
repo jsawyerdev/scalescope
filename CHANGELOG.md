@@ -4,6 +4,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.8.0]
+
+### Added
+
+- Forecast models now auto-detect a dominant seasonal period from each
+  workload's own request-rate history. AutoETS passes the detected period
+  to StatsForecast, and LightGBM adds the detected period as a lag feature
+  when the history supports it. Histories without a confident ACF peak keep
+  the previous no-seasonality behavior.
+
 ## [0.7.1]
 
 ### Changed
