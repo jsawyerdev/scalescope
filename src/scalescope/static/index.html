@@ -9,34 +9,83 @@
 </head>
 <body>
 <header>
-  <h1>ScaleScope</h1>
-  <span class="subtitle">predictive Kubernetes capacity intelligence &mdash; demo mode</span>
-  <label class="model-picker">
-    model
-    <select id="model-select">
-      <option value="naive">naive</option>
-      <option value="seasonal_naive">seasonal_naive</option>
-      <option value="ewma">ewma</option>
-      <option value="linear_trend">linear_trend</option>
-      <option value="auto_ets" selected>auto_ets</option>
-      <option value="lightgbm_quantile">lightgbm_quantile</option>
-    </select>
+  <div class="brand">
+    <h1>ScaleScope</h1>
+    <span class="subtitle">predictive capacity intelligence &mdash; demo mode</span>
+  </div>
+  <label class="field">
+    <span class="field-label">workload</span>
+    <select id="workload-select"></select>
   </label>
 </header>
 
-<div id="diagnosis-banner" class="banner">connecting&hellip;</div>
-
-<section class="stats">
-  <div class="stat"><span class="label">current replicas</span><span class="value" id="stat-current-replicas">&mdash;</span></div>
-  <div class="stat"><span class="label">recommended</span><span class="value" id="stat-recommended-replicas">&mdash;</span></div>
-  <div class="stat"><span class="label">cpu</span><span class="value" id="stat-cpu">&mdash;</span></div>
-  <div class="stat"><span class="label">memory</span><span class="value" id="stat-memory">&mdash;</span></div>
-  <div class="stat"><span class="label">p95 latency</span><span class="value" id="stat-latency">&mdash;</span></div>
-  <div class="stat"><span class="label">confidence</span><span class="value" id="stat-confidence">&mdash;</span></div>
+<section class="panel evidence-panel">
+  <div class="evidence-row">
+    <div class="evidence-item">
+      <span class="field-label">diagnosis</span>
+      <div class="diagnosis-line">
+        <span id="diagnosis-badge" class="badge">&mdash;</span>
+        <span id="diagnosis-text" class="explanation">waiting for data&hellip;</span>
+      </div>
+    </div>
+    <div class="evidence-item">
+      <span class="field-label">data freshness</span>
+      <div class="freshness-line">
+        <span id="freshness-dot" class="dot"></span>
+        <span id="freshness-text">&mdash;</span>
+      </div>
+    </div>
+    <div class="evidence-item">
+      <span class="field-label">source</span>
+      <span id="source-text" class="mono">&mdash;</span>
+    </div>
+  </div>
+  <div id="fetch-error" class="fetch-error" hidden></div>
 </section>
 
-<section class="chart-wrap">
-  <canvas id="request-rate-chart"></canvas>
+<section class="metrics-section">
+  <div class="section-label">observed &mdash; latest simulator tick</div>
+  <div class="metrics" id="metrics-strip">
+    <div class="stat"><span class="label">replicas</span><span class="value" id="stat-replicas">&mdash;</span></div>
+    <div class="stat"><span class="label">request rate</span><span class="value" id="stat-request-rate">&mdash;</span></div>
+    <div class="stat"><span class="label">cpu</span><span class="value" id="stat-cpu">&mdash;</span></div>
+    <div class="stat"><span class="label">cpu throttled</span><span class="value" id="stat-cpu-throttled">&mdash;</span></div>
+    <div class="stat"><span class="label">memory</span><span class="value" id="stat-memory">&mdash;</span></div>
+    <div class="stat"><span class="label">p95 latency</span><span class="value" id="stat-latency">&mdash;</span></div>
+    <div class="stat"><span class="label">error rate</span><span class="value" id="stat-error-rate">&mdash;</span></div>
+    <div class="stat"><span class="label">pending pods</span><span class="value" id="stat-pending">&mdash;</span></div>
+    <div class="stat"><span class="label">restarts</span><span class="value" id="stat-restarts">&mdash;</span></div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-header">
+    <h2>Model comparison</h2>
+    <span class="panel-note">every registered model, evaluated against the same evidence &mdash; select a row to inspect its forecast below</span>
+  </div>
+  <div class="table-wrap">
+    <table id="model-table">
+      <thead>
+        <tr>
+          <th>model</th>
+          <th class="num">recommended</th>
+          <th class="num">&Delta; vs current</th>
+          <th>confidence</th>
+          <th class="num">peak forecast (p90)</th>
+          <th class="num">projected utilization</th>
+        </tr>
+      </thead>
+      <tbody id="model-table-body"></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel chart-panel">
+  <div class="panel-header">
+    <h2>Forecast &mdash; <span id="chart-model-name">&mdash;</span></h2>
+    <span class="panel-note">solid line = observed request rate; dashed = forecast p50; shaded band = p10&ndash;p90 interval (estimated, not observed)</span>
+  </div>
+  <div class="chart-wrap"><canvas id="request-rate-chart"></canvas></div>
 </section>
 
 <script src="app.js"></script>
