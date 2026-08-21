@@ -155,6 +155,17 @@ is_running_service() {
     printf '%s\n' "$RUNNING_SERVICES" | grep -qx "$1"
 }
 
+lightgbm_config_path_is_set() {
+    # docker-compose.yml wires the same SCALESCOPE_LIGHTGBM_CONFIG_PATH into
+    # both services, so this is a single all-or-nothing check against .env
+    # rather than a per-service one - restarting a container that was never
+    # configured to read the tuned config would be a gratuitous outage for
+    # zero effect.
+    [ -f "$ROOT_DIR/.env" ] || return 1
+    value="$(awk -F= '$1 == "SCALESCOPE_LIGHTGBM_CONFIG_PATH" { sub(/^[^=]*=/, ""); print; exit }' "$ROOT_DIR/.env")"
+    [ -n "$value" ]
+}
+
 restart_configured_services() {
     restarted=0
     RUNNING_SERVICES="$(compose ps --services --status running)"
@@ -209,8 +220,12 @@ RESTART_PERFORMED="no"
 if [ "$SHOULD_PROMOTE" = "yes" ]; then
     mv "$CANDIDATE_PATH" "$OUTPUT_PATH"
     PROMOTED="yes"
-    restart_configured_services
-    RESTART_PERFORMED="yes"
+    if lightgbm_config_path_is_set; then
+        restart_configured_services
+        RESTART_PERFORMED="yes"
+    else
+        echo "$(timestamp) SCALESCOPE_LIGHTGBM_CONFIG_PATH not set in .env; skipping restart"
+    fi
 fi
 
 echo "$(timestamp) workload=$WORKLOAD old_mae=$OLD_MAE new_mae=$NEW_MAE promoted=$PROMOTED restart_performed=$RESTART_PERFORMED"
