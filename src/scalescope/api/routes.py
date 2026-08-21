@@ -51,7 +51,7 @@ def _positive_int_lightgbm_config(raw_config: dict[Any, Any], key: str) -> int:
 
 
 def _load_lightgbm_config(path: str | None) -> LightGbmHyperparameters:
-    if path is None:
+    if not path:
         return {}
 
     config_path = Path(path)

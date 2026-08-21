@@ -1,4 +1,5 @@
 .venv-tune/
 smac-output/
+output/
 *.duckdb
 *.json

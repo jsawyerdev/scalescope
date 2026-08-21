@@ -7,10 +7,12 @@ services:
     environment:
       SCALESCOPE_MODE: demo
       SCALESCOPE_TICK_SECONDS: "2.0"
+      SCALESCOPE_LIGHTGBM_CONFIG_PATH: "${SCALESCOPE_LIGHTGBM_CONFIG_PATH:-}"
       SCALESCOPE_AUTH_USERNAME: "${SCALESCOPE_AUTH_USERNAME:-}"
       SCALESCOPE_AUTH_PASSWORD: "${SCALESCOPE_AUTH_PASSWORD:-}"
     volumes:
       - scalescope-data:/data
+      - ./scripts/tune/output:/tune-output:ro
 
   # Real-cluster instance. Opt-in (`docker compose --profile observe up -d`)
   # since it needs a kubeconfig for the scalescope-actuator identity
@@ -38,10 +40,12 @@ services:
       SCALESCOPE_K8S_KUBECONFIG: /kubeconfig/observer.kubeconfig
       SCALESCOPE_K8S_METRICS_URL: "${SCALESCOPE_K8S_METRICS_URL:-http://host.docker.internal:18080/metrics}"
       SCALESCOPE_ACTUATE: "${SCALESCOPE_ACTUATE:-false}"
+      SCALESCOPE_LIGHTGBM_CONFIG_PATH: "${SCALESCOPE_LIGHTGBM_CONFIG_PATH:-}"
       SCALESCOPE_AUTH_USERNAME: "${SCALESCOPE_AUTH_USERNAME:-}"
       SCALESCOPE_AUTH_PASSWORD: "${SCALESCOPE_AUTH_PASSWORD:-}"
     volumes:
       - scalescope-observe-data:/data
+      - ./scripts/tune/output:/tune-output:ro
       - "${SCALESCOPE_OBSERVER_KUBECONFIG:-./scalescope-observer.kubeconfig}:/kubeconfig/observer.kubeconfig:ro"
     extra_hosts:
       - "host.docker.internal:host-gateway"

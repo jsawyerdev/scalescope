@@ -118,6 +118,10 @@ still exists for a single `model=` choice.
 Operator-run SMAC3 tuning for `lightgbm_quantile` lives in
 [`scripts/tune`](scripts/tune/README.md). It writes an opt-in JSON config for
 `SCALESCOPE_LIGHTGBM_CONFIG_PATH`; SMAC3 stays out of the app dependency set.
+The same directory also includes a cron-safe periodic re-tuning driver that
+copies current DuckDB data from a running compose service, compares the deployed
+config against the new candidate on that data, and only restarts services after
+a real promotion.
 
 ## Diagnosis logic
 

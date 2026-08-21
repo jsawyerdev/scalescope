@@ -5,6 +5,13 @@ import pytest
 from scalescope.api.routes import _load_lightgbm_config
 
 
+@pytest.mark.parametrize("path", [None, ""])
+def test_load_lightgbm_config_treats_unset_or_empty_as_defaults(
+    path: str | None,
+) -> None:
+    assert _load_lightgbm_config(path) == {}
+
+
 def test_load_lightgbm_config_accepts_flat_hyperparameter_json(
     tmp_path,
 ) -> None:
@@ -35,3 +42,8 @@ def test_load_lightgbm_config_rejects_unknown_keys(tmp_path) -> None:
 
     with pytest.raises(RuntimeError, match="unsupported LightGBM"):
         _load_lightgbm_config(str(config_path))
+
+
+def test_load_lightgbm_config_rejects_missing_real_path(tmp_path) -> None:
+    with pytest.raises(RuntimeError, match="missing file"):
+        _load_lightgbm_config(str(tmp_path / "missing.json"))

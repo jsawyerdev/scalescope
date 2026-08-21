@@ -4,6 +4,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.10.0]
+
+### Added
+
+- Added `scripts/tune/tune_periodic.sh`, a bash 3.2-safe cron driver for
+  periodic LightGBM SMAC3 re-tuning. It copies the live DuckDB file from a
+  running compose service, scores the hardcoded defaults, the currently
+  deployed tuned config, and the new SMAC candidate against the current data,
+  then atomically promotes and restarts services only when the new candidate
+  beats the deployed config.
+- `docker-compose.yml` now exposes `scripts/tune/output/` read-only at
+  `/tune-output` and passes opt-in
+  `SCALESCOPE_LIGHTGBM_CONFIG_PATH="${SCALESCOPE_LIGHTGBM_CONFIG_PATH:-}"` to
+  both DEMO and OBSERVE services, so operators can point containers at
+  `/tune-output/<workload>.json` after a successful promotion.
+
+### Fixed
+
+- Empty `SCALESCOPE_LIGHTGBM_CONFIG_PATH` values now behave like an unset value,
+  preserving the zero-config DEMO path while keeping strict startup failure for
+  real configured paths that are missing, malformed, or invalid.
+
 ## [0.9.0]
 
 ### Added
