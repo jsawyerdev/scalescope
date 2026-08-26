@@ -8,7 +8,7 @@ from scalescope.models.baselines import (
 )
 
 
-def test_naive_repeats_last_value():
+def test_naive_repeats_last_value() -> None:
     history = np.array([10.0, 20.0, 30.0])
     forecast = NaiveModel().predict(history, horizon=5)
     assert np.all(forecast.p50 == 30.0)
@@ -16,19 +16,19 @@ def test_naive_repeats_last_value():
     assert np.all(forecast.p90 >= forecast.p50)
 
 
-def test_linear_trend_extrapolates_upward_trend():
+def test_linear_trend_extrapolates_upward_trend() -> None:
     history = np.arange(0.0, 60.0)
     forecast = LinearTrendModel().predict(history, horizon=5)
     assert forecast.p50[-1] > forecast.p50[0]
 
 
-def test_ewma_smooths_noise():
+def test_ewma_smooths_noise() -> None:
     history = np.array([100.0, 10.0, 100.0, 10.0, 100.0, 10.0] * 5)
     forecast = EwmaModel().predict(history, horizon=1)
     assert 10.0 < forecast.p50[0] < 100.0
 
 
-def test_seasonal_naive_falls_back_on_short_history():
+def test_seasonal_naive_falls_back_on_short_history() -> None:
     history = np.array([1.0, 2.0, 3.0])
     forecast = SeasonalNaiveModel().predict(history, horizon=3)
     assert forecast.model_name == "naive"

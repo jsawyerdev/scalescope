@@ -19,11 +19,11 @@ services:
   # (scripts/generate-observer-kubeconfig.sh, after applying k8s/rbac/) and
   # a route to the workload's own /metrics and /trigger for real
   # request-rate/latency/error-rate and the dashboard's load-generator
-  # buttons. SCALESCOPE_K8S_METRICS_URL's default assumes `kubectl
-  # port-forward -n <namespace> svc/<name> 18080:80` on the host - fine to
-  # start with, but that process has no supervision and dies silently; a
-  # LoadBalancer Service's stable IP is more reliable if your cluster can
-  # provision one (see .env.example).
+  # buttons. SCALESCOPE_K8S_NAMESPACES is a comma-separated discovery
+  # allowlist; use "*" only with a ServiceAccount intentionally allowed to
+  # inspect the whole cluster. A LoadBalancer Service's stable IP is more
+  # reliable for SCALESCOPE_K8S_METRICS_URL than an unsupervised local
+  # `kubectl port-forward` process (see .env.example).
   # SCALESCOPE_ACTUATE defaults to false: observing a cluster must never
   # imply writing to it without an explicit opt-in.
   scalescope-observe:
@@ -37,6 +37,7 @@ services:
       SCALESCOPE_TICK_SECONDS: "2.0"
       SCALESCOPE_K8S_NAMESPACE: "${SCALESCOPE_K8S_NAMESPACE:-scalescope-demo}"
       SCALESCOPE_K8S_DEPLOYMENT: "${SCALESCOPE_K8S_DEPLOYMENT:-sample-workload}"
+      SCALESCOPE_K8S_NAMESPACES: "${SCALESCOPE_K8S_NAMESPACES:-scalescope-demo}"
       SCALESCOPE_K8S_KUBECONFIG: /kubeconfig/observer.kubeconfig
       SCALESCOPE_K8S_METRICS_URL: "${SCALESCOPE_K8S_METRICS_URL:-http://host.docker.internal:18080/metrics}"
       SCALESCOPE_ACTUATE: "${SCALESCOPE_ACTUATE:-false}"

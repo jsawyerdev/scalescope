@@ -19,18 +19,18 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
 
-# Dependencies install from pyproject.toml alone so this layer only
-# invalidates when declared dependencies change, not on every source edit.
-COPY pyproject.toml ./
+# Dependency metadata installs before source so this layer avoids invalidating
+# on every code edit. README.md and license files are package metadata inputs.
+COPY pyproject.toml README.md LICENSE NOTICE ./
 RUN --mount=type=cache,target=/root/.cache/pip \
     mkdir -p src/scalescope && touch src/scalescope/__init__.py \
     && pip install --upgrade pip setuptools wheel \
-    && pip install . 
+    && pip install .
 
 COPY src ./src
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade --no-cache-dir  --no-deps .
+    pip install --upgrade --no-cache-dir --no-deps .
 
 FROM python:3.14-slim AS runtime
 

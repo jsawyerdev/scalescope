@@ -36,7 +36,8 @@ class WorkloadState:
     tick: int = 0
     fault_ticks_remaining: int = 0
     active_fault: str | None = None
-    rng: random.Random = field(default_factory=lambda: random.Random(42))
+    # DEMO observations must be repeatable; this RNG never handles secret material.
+    rng: random.Random = field(default_factory=lambda: random.Random(42))  # nosec B311
 
 
 class WorkloadSimulator:

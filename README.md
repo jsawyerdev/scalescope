@@ -6,25 +6,47 @@ runs that alongside a deterministic diagnosis engine that flags when scaling is
 the wrong response (CPU limit throttling, memory leak, node capacity exhaustion,
 HPA ceiling, non-CPU bottleneck).
 
-## Status: v0.7 (demo + observe + opt-in actuation + on-demand load triggers + replay lab + optional auth, verified against a real cluster)
+## Status: v0.11.1 (demo + multi-namespace observe + opt-in actuation + on-demand load triggers + replay lab + optional auth, verified against a real cluster)
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed at each version.
 
-This is a scaffold, not a finished product. Two ways to run it:
+Created by James Sawyer.
+
+ScaleScope is a working lab with two supported runtime modes:
 
 - **`SCALESCOPE_MODE=demo`** (default): entirely self-contained against a
   synthetic workload simulator, no Kubernetes cluster needed — `docker
   compose up --build` and you're watching data within seconds.
-- **`SCALESCOPE_MODE=observe`**: reads a real Deployment's replicas/CPU/memory
-  from the Kubernetes API and metrics-server, read-only, via a least-privilege
-  RBAC identity — see "Wiring in a real cluster" below. `request_rate`,
-  `latency_p95_ms`, and `error_rate` require the workload to expose those as
-  Prometheus gauges (not derivable from the Kubernetes API alone); without
-  that they report as `0.0` rather than a fabricated value.
+- **`SCALESCOPE_MODE=observe`**: discovers Deployments across
+  `SCALESCOPE_K8S_NAMESPACES`, reads their replicas/CPU/memory from the
+  Kubernetes API and metrics-server, and shows them as selectable
+  `namespace/deployment` targets. `request_rate`, `latency_p95_ms`, and
+  `error_rate` require the workload to expose Prometheus gauges (not
+  derivable from the Kubernetes API alone); without that they report as
+  `0.0` rather than a fabricated value.
 
-The online-learning drift detector (River) and foundation-model forecasters
-(Chronos-2/TimesFM via Darts) are on the roadmap and not implemented yet —
-see "Not yet built" below.
+## Advisory or autoscaling?
+
+Both are supported, but the release default is advisory.
+
+| Deployment shape | Writes replicas? | Intended use |
+|---|---:|---|
+| DEMO | No | Local dashboard, forecasting, diagnosis, replay, and load-trigger demo |
+| OBSERVE advisory | No | Read a real cluster and show recommendations without changing workloads |
+| OBSERVE actuation | Yes, opt-in | Patch `deployments/scale` when the forecast recommends a different replica count and diagnosis says scaling will help |
+
+Actuation requires all of the following:
+
+- `SCALESCOPE_MODE=observe`
+- `SCALESCOPE_ACTUATE=true`
+- RBAC from `k8s/scalescope-actuation/` or equivalent access to
+  `deployments/scale`
+- no `HorizontalPodAutoscaler` targeting the same Deployment, because
+  ScaleScope refuses to fight another replica controller
+
+The dashboard and `GET /api/source` show which cluster identity is connected,
+which namespace scope is visible, and whether actuation is enabled.
+See [examples/README.md](examples/README.md) for copy-paste deployment paths.
 
 ## Architecture
 
@@ -53,7 +75,7 @@ flowchart TB
     end
 
     SIM -->|insert_observation| STORE
-    DEPLOY -->|get/list/watch| COLLECTOR
+    DEPLOY -->|get/list| COLLECTOR
     METRICSRV -->|get/list| COLLECTOR
     WORKLOAD -->|scrape /metrics| COLLECTOR
     COLLECTOR -->|insert_observation| STORE
@@ -108,7 +130,8 @@ the P90 window as `peak_demand` and requires enough replicas to serve that peak 
 `TARGET_UTILIZATION` (0.70). Sizing to the median would under-provision for roughly half the
 horizon by definition; sizing to the upper quantile is a deliberate peak-not-average safety margin.
 `confidence` in the response is derived from the mean P90-minus-P10 band width relative to peak
-demand — a wide band lowers confidence rather than being ignored.
+demand. Forecasts below `MIN_CONFIDENCE_TO_SCALE` (0.10) are still shown for comparison, but they
+keep the current replica count instead of driving a scale change.
 
 `GET /api/workloads/{name}/recommendations` (plural) runs every registered model against the same
 history and returns all six recommendations side by side, so the dashboard can compare them instead
@@ -189,8 +212,8 @@ flowchart TD
 
 Deliberately scoped: this backtests a model's forecast against what the
 workload's own metrics actually did next, not against what a real
-Kubernetes HPA would have decided over the same window — see "Not yet
-built" below. It also runs on demand rather than the dashboard's 3s poll
+Kubernetes HPA would have decided over the same window — see "Known
+limitations" below. It also runs on demand rather than the dashboard's 3s poll
 cycle: retraining all 6 models (LightGBM included) across 5 anchor points
 takes roughly 2-10 seconds depending on history size and CPU contention,
 confirmed live against both a DEMO instance (5000 synthetic rows, ~2s) and
@@ -205,6 +228,8 @@ docker compose up --build
 Then open http://localhost:8000. A synthetic workload (`payments-api`) starts
 generating observations immediately; the dashboard begins populating within a
 few seconds. Data persists in the `scalescope-data` volume across restarts.
+The dashboard ships its own DejaVu Sans Mono Regular font and uses that same
+face for labels, tables, charts, and metric values.
 
 Environment variables (see `src/scalescope/config.py`):
 
@@ -217,10 +242,11 @@ Environment variables (see `src/scalescope/config.py`):
 | `SCALESCOPE_HORIZON_STEPS` | `30` | Forecast horizon, in ticks |
 | `SCALESCOPE_HISTORY_STEPS` | `600` | Observation history window fed to models |
 | `SCALESCOPE_LIGHTGBM_CONFIG_PATH` | unset | Optional LightGBM hyperparameter JSON produced by `scripts/tune` |
-| `SCALESCOPE_K8S_NAMESPACE` | `scalescope-demo` | Namespace to observe (observe mode only) |
-| `SCALESCOPE_K8S_DEPLOYMENT` | `sample-workload` | Deployment to observe (observe mode only) |
+| `SCALESCOPE_K8S_NAMESPACE` | `scalescope-demo` | Primary namespace for metrics URL attachment and opt-in actuation |
+| `SCALESCOPE_K8S_DEPLOYMENT` | `sample-workload` | Primary deployment for metrics URL attachment and opt-in actuation |
+| `SCALESCOPE_K8S_NAMESPACES` | `SCALESCOPE_K8S_NAMESPACE` | Comma-separated namespaces to discover in OBSERVE mode; `*` lists all namespaces visible to the ServiceAccount |
 | `SCALESCOPE_K8S_KUBECONFIG` | unset | Kubeconfig path; unset tries in-cluster config, then default kubeconfig discovery |
-| `SCALESCOPE_K8S_METRICS_URL` | unset | Workload's own `/metrics` URL, for real `request_rate`/`latency_p95_ms`/`error_rate` |
+| `SCALESCOPE_K8S_METRICS_URL` | unset | Primary workload's own `/metrics` URL, for real `request_rate`/`latency_p95_ms`/`error_rate` and `/trigger` proxying |
 | `SCALESCOPE_ACTUATE` | `false` | Observe mode only: actually write recommended replica counts to the cluster (see "Actuation" below) |
 | `SCALESCOPE_AUTH_USERNAME` | unset | HTTP Basic Auth username for every route (see "Authentication" below) |
 | `SCALESCOPE_AUTH_PASSWORD` | unset | HTTP Basic Auth password; both must be set together |
@@ -237,14 +263,47 @@ package set to `requirements-lock.txt` and leaves the service(s) running
 - `./scripts/rebuild.sh --wipe-data` — also drops the DuckDB volume(s), for
   a clean-slate rebuild instead of preserving history across it.
 
+### Verify a running instance
+
+For DEMO mode, these checks should all return HTTP 200 after either
+`docker compose up --build` or `./scripts/rebuild.sh`:
+
+```
+curl -fs http://localhost:8000/healthz
+curl -fs http://localhost:8000/api/source
+curl -fs http://localhost:8000/api/workloads
+curl -fs "http://localhost:8000/api/workloads/payments-api/recommendations"
+```
+
+If Basic Auth is enabled, add
+`-u "$SCALESCOPE_AUTH_USERNAME:$SCALESCOPE_AUTH_PASSWORD"` to the API
+requests. `./scripts/rebuild.sh` performs these smoke checks automatically
+and leaves the healthy service running.
+
+For OBSERVE mode, replace the URL with `http://localhost:8001` for local
+Docker OBSERVE mode, or port-forward the in-cluster Service first:
+
+```
+kubectl -n scalescope-system port-forward svc/scalescope 8000:80
+curl -fs http://localhost:8000/api/source
+curl -fs http://localhost:8000/api/workloads
+```
+
+`/api/source` should show `mode: observe`, `connected: true`, the cluster
+server, the authentication identity, and the namespace scope. Workload IDs
+are returned as `namespace:deployment`; use one of those IDs when calling
+forecast, recommendation, diagnosis, replay, or trigger endpoints.
+
 ### Authentication
 
 Both `SCALESCOPE_AUTH_USERNAME` and `SCALESCOPE_AUTH_PASSWORD` unset (the
 default): no authentication — every route, including the dashboard itself,
 is open. This is an explicit supported mode for trusted-LAN or homelab
-operators who deliberately accept that risk. When `SCALESCOPE_ACTUATE=true`
-is set without credentials, ScaleScope logs a startup warning and still
-starts. Set both variables to enable HTTP Basic Auth
+operators who deliberately accept that risk. Setting exactly one of the two
+auth variables is a startup configuration error; ScaleScope refuses that
+state rather than silently disabling auth. When `SCALESCOPE_ACTUATE=true` is
+set without credentials, ScaleScope logs a startup warning and still starts.
+Set both variables to enable HTTP Basic Auth
 (`src/scalescope/auth.py`, applied as ASGI middleware so it covers the
 static dashboard files as well as `/api/*`, not just the API):
 
@@ -258,6 +317,28 @@ static dashboard files as well as `/api/*`, not just the API):
   through from `.env` to both services if set there (see
   `.env.example`). `scripts/rebuild.sh`'s own smoke-test curls read the
   same `.env` file directly and authenticate if configured.
+
+### Release security model
+
+ScaleScope ships with a safe default network shape, not a universal
+authentication policy. The Kubernetes Service in `k8s/scalescope/` is
+`ClusterIP`, OBSERVE mode is read-only unless actuation is explicitly enabled,
+and the optional Basic Auth Secret provides a simple app-level guard for demos,
+homelabs, and trusted internal paths.
+
+Production operators are responsible for the exposure layer that matches their
+environment. Do not expose ScaleScope unauthenticated on an untrusted network;
+configure either `SCALESCOPE_AUTH_USERNAME`/`SCALESCOPE_AUTH_PASSWORD` through
+the `scalescope-auth` Secret, or put the Service behind an ingress, gateway,
+VPN, SSO proxy, mTLS policy, or other organization-approved control with TLS.
+
+Namespace visibility is also a deployment-time authorization decision.
+ScaleScope only discovers and displays the namespaces and Deployments its
+ServiceAccount can read. For least privilege, bind the ServiceAccount to the
+specific namespaces users are allowed to inspect; use
+`SCALESCOPE_K8S_NAMESPACES=*` only when cluster-wide visibility is intended.
+Apply `k8s/scalescope-actuation/` and set `SCALESCOPE_ACTUATE=true` only for
+environments where ScaleScope is authorized to change replica counts.
 
 ### What the dashboard fetches, and when
 
@@ -286,10 +367,43 @@ sequenceDiagram
 
 ## Wiring in a real cluster (OBSERVE mode)
 
-`src/scalescope/k8s_collector.py` reads a single Deployment's state via the
-Kubernetes API (`get`/`list`/`watch` on Deployments and Pods, `get`/`list` on
-metrics.k8s.io PodMetrics if metrics-server is installed) — it never writes
-to the cluster. `k8s/rbac/` defines a least-privilege identity for this:
+`src/scalescope/k8s_collector.py` discovers Deployments in
+`SCALESCOPE_K8S_NAMESPACES` and reads each target's state via the Kubernetes
+API (`get`/`list` on Deployments and Pods, `get`/`list` on
+metrics.k8s.io PodMetrics if metrics-server is installed). Workloads are
+stored as `namespace:deployment`, and the dashboard labels them as
+`namespace/deployment` so users can choose the target they want recommendations
+for.
+
+For a real in-cluster install, build and push the Docker image, set
+`k8s/scalescope/deployment.yaml`'s `image:` to that registry reference, then:
+
+```
+kubectl apply -f k8s/scalescope/
+kubectl -n scalescope-system port-forward svc/scalescope 8000:80
+```
+
+The bundled Service is `ClusterIP`, so it is internal to the cluster unless
+you add an Ingress, load balancer, or port-forward. If you expose it beyond a
+trusted local demo path, create the optional Basic Auth Secret before rolling
+the Deployment:
+
+```
+kubectl -n scalescope-system create secret generic scalescope-auth \
+  --from-literal=username="$SCALESCOPE_AUTH_USERNAME" \
+  --from-literal=password="$SCALESCOPE_AUTH_PASSWORD"
+```
+
+`k8s/scalescope/` is observe-only. To let ScaleScope write replica counts as
+well, set `SCALESCOPE_ACTUATE=true` on the Deployment and apply the separate
+actuation RBAC:
+
+```
+kubectl apply -f k8s/scalescope-actuation/
+```
+
+For local Docker OBSERVE mode, `k8s/rbac/` still defines a namespace-scoped
+identity and standalone kubeconfig:
 
 1. `kubectl apply -f k8s/rbac/` — creates the `scalescope-demo` namespace, a
    `scalescope-actuator` ServiceAccount, a namespace-scoped Role (the read
@@ -441,9 +555,9 @@ sequenceDiagram
     UI->>UI: local countdown timer for duration_seconds
 ```
 
-`stress` is OBSERVE-only because it saturates real CPU cores inside
-sample-workload worker processes; the synthetic DEMO simulator has no
-equivalent process to stress. `base_url` is derived from
+`stress` is OBSERVE-only because it runs a real bounded CPU worker inside
+sample-workload processes; the synthetic DEMO simulator has no equivalent
+process to stress. `base_url` is derived from
 `SCALESCOPE_K8S_METRICS_URL` (its `/metrics` suffix stripped) —
 ScaleScope has no other route to the workload's process, so OBSERVE-mode
 triggers require that variable to be set.
@@ -470,33 +584,35 @@ triggers require that variable to be set.
 ## Develop locally
 
 ```
-python3.13 -m venv .venv && source .venv/bin/activate
+python3.14 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 uvicorn scalescope.main:app --reload
 pytest
-ruff check src tests
+mypy
+black src tests sample-workload/app scripts/tune
+ruff check .
 ```
 
-## Not yet built (roadmap, not implemented)
+## License
+
+ScaleScope is licensed under the Apache License 2.0. Copyright 2026 James
+Sawyer. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+The bundled DejaVu Sans Mono Regular font keeps its own license in
+`src/scalescope/static/fonts/DejaVu-LICENSE.txt`.
+
+## Known limitations
 
 - **`cpu_throttled_pct` in OBSERVE mode**: needs cAdvisor
   `container_cpu_cfs_throttled` data, not exposed by the Kubernetes API or
   metrics-server; always `0.0` when observing a real cluster.
-- **OpenTelemetry ingestion** as an alternative to the per-workload
-  Prometheus-gauge scrape convention `k8s_collector.py` currently uses.
-- **Online drift detection** (River) to gate forecast confidence on regime change.
-- **Foundation-model forecasters** (Chronos-2, TimesFM 2.5 via Darts).
 - **Replay lab vs. real HPA behavior**: the current replay lab
-  (`GET /api/workloads/{name}/replay`, see "API" below) backtests every
+  (`GET /api/workloads/{name}/replay`, see "API" above) backtests every
   model against the workload's own subsequent recorded values (MAE/MAPE
   per model) — it does not yet compare against what a real Kubernetes HPA
-  would have decided over the same recorded window, which is a separate,
-  unbuilt comparison.
-- **KEDA external-scaler integration** as an alternative actuation mode
-  (emit a metric for KEDA/HPA to consume, shadow-run alongside the direct
-  write). Not a correction of what's built today: actuation already
-  exists via direct RBAC write to `deployments/scale` with HPA-conflict
-  refusal (see "Actuation" below) — KEDA would be an additional mode, not
-  a replacement.
-- Multi-workload support (one workload at a time: one simulated series in
-  DEMO mode, one Deployment in OBSERVE mode).
+  would have decided over the same recorded window.
+- Per-workload Prometheus metrics URL discovery. Today,
+  `SCALESCOPE_K8S_METRICS_URL` attaches request/latency/error metrics and
+  `/trigger` proxying to the primary
+  `SCALESCOPE_K8S_NAMESPACE`/`SCALESCOPE_K8S_DEPLOYMENT` target; other
+  discovered Deployments use Kubernetes replica/CPU/memory signals only.

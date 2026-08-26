@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from urllib3.exceptions import HTTPError as Urllib3HTTPError
 
 from scalescope.k8s_actuator import ActuationError, HpaConflictError, KubernetesActuator
 
@@ -38,7 +39,7 @@ def _hpa(name: str, target_kind: str, target_name: str) -> SimpleNamespace:
     )
 
 
-def test_scale_refuses_when_competing_hpa_targets_same_deployment():
+def test_scale_refuses_when_competing_hpa_targets_same_deployment() -> None:
     actuator, mock_apps, mock_autoscaling = _make_actuator()
     mock_autoscaling.list_namespaced_horizontal_pod_autoscaler.return_value = (
         SimpleNamespace(items=[_hpa("existing-hpa", "Deployment", "sample-workload")])
@@ -50,7 +51,7 @@ def test_scale_refuses_when_competing_hpa_targets_same_deployment():
     mock_apps.patch_namespaced_deployment_scale.assert_not_called()
 
 
-def test_scale_ignores_hpa_targeting_a_different_deployment():
+def test_scale_ignores_hpa_targeting_a_different_deployment() -> None:
     actuator, mock_apps, mock_autoscaling = _make_actuator()
     mock_autoscaling.list_namespaced_horizontal_pod_autoscaler.return_value = (
         SimpleNamespace(items=[_hpa("other-hpa", "Deployment", "unrelated-deployment")])
@@ -63,7 +64,7 @@ def test_scale_ignores_hpa_targeting_a_different_deployment():
     )
 
 
-def test_scale_writes_when_no_hpa_present():
+def test_scale_writes_when_no_hpa_present() -> None:
     actuator, mock_apps, mock_autoscaling = _make_actuator()
     mock_autoscaling.list_namespaced_horizontal_pod_autoscaler.return_value = (
         SimpleNamespace(items=[])
@@ -76,7 +77,7 @@ def test_scale_writes_when_no_hpa_present():
     )
 
 
-def test_scale_wraps_api_failure_as_actuation_error():
+def test_scale_wraps_api_failure_as_actuation_error() -> None:
     from kubernetes.client.rest import ApiException
 
     actuator, mock_apps, mock_autoscaling = _make_actuator()
@@ -88,4 +89,25 @@ def test_scale_wraps_api_failure_as_actuation_error():
     )
 
     with pytest.raises(ActuationError, match="Forbidden"):
+        actuator.scale("sample-workload", 3)
+
+
+def test_scale_wraps_hpa_transport_failure_as_actuation_error() -> None:
+    actuator, _, mock_autoscaling = _make_actuator()
+    mock_autoscaling.list_namespaced_horizontal_pod_autoscaler.side_effect = (
+        Urllib3HTTPError("down")
+    )
+
+    with pytest.raises(ActuationError, match="HorizontalPodAutoscalers"):
+        actuator.scale("sample-workload", 3)
+
+
+def test_scale_wraps_patch_transport_failure_as_actuation_error() -> None:
+    actuator, mock_apps, mock_autoscaling = _make_actuator()
+    mock_autoscaling.list_namespaced_horizontal_pod_autoscaler.return_value = (
+        SimpleNamespace(items=[])
+    )
+    mock_apps.patch_namespaced_deployment_scale.side_effect = Urllib3HTTPError("down")
+
+    with pytest.raises(ActuationError, match="failed to scale"):
         actuator.scale("sample-workload", 3)

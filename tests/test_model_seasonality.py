@@ -27,6 +27,30 @@ def test_auto_ets_keeps_season_length_one_without_detected_period(
     assert captured == [1]
 
 
+def test_auto_ets_falls_back_when_forecast_type_is_unexpected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeAutoETS:
+        def __init__(self, season_length: int) -> None:
+            pass
+
+    class FakeStatsForecast:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def forecast(self, df: pd.DataFrame, h: int, level: list[int]) -> object:
+            return object()
+
+    monkeypatch.setattr(statsforecast_model, "AutoETS", FakeAutoETS)
+    monkeypatch.setattr(statsforecast_model, "StatsForecast", FakeStatsForecast)
+
+    forecast = statsforecast_model.AutoEtsModel().predict(
+        np.arange(120, dtype=float), horizon=3
+    )
+
+    assert forecast.model_name == "naive"
+
+
 def test_lightgbm_appends_detected_period_lag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

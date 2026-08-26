@@ -4,11 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ScaleScope</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="preload" href="fonts/DejaVuSansMono.ttf" as="font" type="font/ttf" crossorigin>
 <link rel="stylesheet" href="style.css">
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1" integrity="sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ" crossorigin="anonymous"></script>
 </head>
 <body>
 <div class="shell">
@@ -16,55 +14,62 @@
 <aside class="sidebar">
   <div class="brand">
     <h1>ScaleScope</h1>
-    <span class="subtitle">predictive capacity intelligence</span>
+    <span class="subtitle">capacity intelligence</span>
   </div>
 
   <label class="field">
-    <span class="field-label">workload</span>
+    <span class="field-label">Workload</span>
     <select id="workload-select"></select>
   </label>
 
   <div class="side-panel">
-    <div class="side-panel-title">source</div>
+    <div class="side-panel-title">Data Source</div>
     <div class="side-item">
-      <span class="field-label hint" title="DEMO: synthetic simulator, no cluster connection. OBSERVE: reading a real Kubernetes Deployment's replicas/CPU/memory.">mode</span>
-      <span id="mode-badge" class="badge mode">&mdash;</span>
+      <span class="field-label hint" title="DEMO: synthetic simulator, no cluster connection. OBSERVE: reading real Kubernetes Deployment, Pod, and PodMetrics data.">Mode</span>
+      <span id="mode-badge" class="badge mode">-</span>
     </div>
     <div class="side-item">
-      <span class="field-label">observing</span>
-      <span id="source-target-text" class="mono">&mdash;</span>
+      <span class="field-label">Target</span>
+      <span id="source-target-text" class="mono">-</span>
     </div>
     <div class="side-item">
-      <span class="field-label">connection</span>
+      <span class="field-label">Collection</span>
       <div class="freshness-line">
         <span id="source-conn-dot" class="dot"></span>
-        <span id="source-conn-text">&mdash;</span>
+        <span id="source-conn-text">-</span>
       </div>
     </div>
     <div class="side-item" id="actuation-item" hidden>
-      <span class="field-label hint" title="Only shown when SCALESCOPE_ACTUATE=true. ScaleScope writes recommended replica counts directly to the cluster, but refuses if a real HorizontalPodAutoscaler already targets the same Deployment (two controllers writing the same value would fight each other).">actuation</span>
+      <span class="field-label hint" title="Only shown when SCALESCOPE_ACTUATE=true. ScaleScope writes recommended replica counts directly to the cluster and refuses to compete with an existing HorizontalPodAutoscaler.">Actuation</span>
       <div class="freshness-line">
         <span id="actuation-dot" class="dot"></span>
-        <span id="actuation-text">&mdash;</span>
+        <span id="actuation-text">-</span>
       </div>
     </div>
     <div id="source-error" class="fetch-error" hidden></div>
   </div>
 
   <div class="side-panel">
-    <div class="side-panel-title">generate load</div>
-    <p class="panel-note">forces a pattern on the live workload now, so its effect on the metrics/diagnosis is visible within a few ticks</p>
+    <div class="side-panel-title">Load Test</div>
+    <label class="field">
+      <span class="field-label">Duration</span>
+      <select id="trigger-duration-select">
+        <option value="45">45 sec</option>
+        <option value="120">2 min</option>
+        <option value="300" selected>5 min</option>
+      </select>
+    </label>
     <div class="trigger-row">
-      <button class="trigger-btn" data-kind="cpu">CPU spike</button>
-      <button class="trigger-btn" data-kind="memory">Memory leak</button>
-      <button class="trigger-btn" data-kind="traffic">Traffic spike</button>
-      <button class="trigger-btn" data-kind="stress" title="OBSERVE mode only">CPU stress (OBSERVE)</button>
+      <button class="trigger-btn" data-kind="cpu">Spike CPU</button>
+      <button class="trigger-btn" data-kind="memory">Leak Memory</button>
+      <button class="trigger-btn" data-kind="traffic">Spike Traffic</button>
+      <button class="trigger-btn" data-kind="stress" title="OBSERVE mode only">Stress CPU</button>
     </div>
-    <span id="trigger-status" class="trigger-status">&mdash;</span>
+    <span id="trigger-status" class="trigger-status">-</span>
   </div>
 
   <div class="sidebar-footer">
-    <span id="version-text">&mdash;</span>
+    <span id="version-text">-</span>
   </div>
 </aside>
 
@@ -73,57 +78,129 @@
   <section class="panel evidence-panel">
     <div class="evidence-row">
       <div class="evidence-item">
-        <span class="field-label hint" title="Deterministic rule engine, never calls a model. Flags when adding replicas would not fix (or would mask) the real problem: CPU limit throttling, memory leak, node capacity exhaustion, HPA ceiling, or a non-CPU bottleneck.">diagnosis</span>
+        <span class="field-label hint" title="Deterministic rule engine, never calls a model. Flags when adding replicas would not fix or would mask the real problem.">Diagnosis</span>
         <div class="diagnosis-line">
-          <span id="diagnosis-badge" class="badge">&mdash;</span>
-          <span id="diagnosis-text" class="explanation">waiting for data&hellip;</span>
+          <span id="diagnosis-badge" class="badge">-</span>
+          <span id="diagnosis-text" class="explanation">waiting for data...</span>
         </div>
       </div>
       <div class="evidence-item">
-        <span class="field-label hint" title="Time since the latest observation. Green = fresh, amber = aging, red = stale — a stale reading means the data below may not reflect what's happening right now.">data freshness</span>
+        <span class="field-label hint" title="Time since the latest observation. Green is fresh, amber is aging, red is stale.">Data Age</span>
         <div class="freshness-line">
           <span id="freshness-dot" class="dot"></span>
-          <span id="freshness-text">&mdash;</span>
+          <span id="freshness-text">-</span>
         </div>
       </div>
       <div class="evidence-item">
-        <span class="field-label">workload</span>
-        <span id="source-text" class="mono">&mdash;</span>
+        <span class="field-label">Selected Target</span>
+        <span id="source-text" class="mono">-</span>
       </div>
     </div>
     <div id="fetch-error" class="fetch-error" hidden></div>
   </section>
 
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Cluster</h2>
+      <span id="cluster-status-note" class="panel-note">-</span>
+    </div>
+    <div class="detail-grid">
+      <div class="detail-item">
+        <span class="label">Authenticated To</span>
+        <span class="value mono" id="cluster-server-text">-</span>
+      </div>
+      <div class="detail-item">
+        <span class="label">Authenticated As</span>
+        <span class="value mono" id="cluster-auth-text">-</span>
+      </div>
+      <div class="detail-item">
+        <span class="label">Namespace Scope</span>
+        <span class="value mono" id="cluster-scope-text">-</span>
+      </div>
+      <div class="detail-item">
+        <span class="label">Visible Deployments</span>
+        <span class="value mono" id="cluster-target-count-text">-</span>
+      </div>
+    </div>
+  </section>
+
   <section class="metrics-section">
-    <div class="section-label">observed &mdash; latest tick</div>
+    <div class="section-label">Latest Observation</div>
     <div class="metrics" id="metrics-strip">
-      <div class="stat"><span class="label">replicas</span><span class="value" id="stat-replicas">&mdash;</span></div>
-      <div class="stat"><span class="label">request rate</span><span class="value" id="stat-request-rate">&mdash;</span></div>
-      <div class="stat"><span class="label">cpu</span><span class="value" id="stat-cpu">&mdash;</span></div>
-      <div class="stat"><span class="label">cpu throttled</span><span class="value" id="stat-cpu-throttled">&mdash;</span></div>
-      <div class="stat"><span class="label">memory</span><span class="value" id="stat-memory">&mdash;</span></div>
-      <div class="stat"><span class="label">p95 latency</span><span class="value" id="stat-latency">&mdash;</span></div>
-      <div class="stat"><span class="label">error rate</span><span class="value" id="stat-error-rate">&mdash;</span></div>
-      <div class="stat"><span class="label">pending pods</span><span class="value" id="stat-pending">&mdash;</span></div>
-      <div class="stat"><span class="label">restarts</span><span class="value" id="stat-restarts">&mdash;</span></div>
+      <div class="stat"><span class="label">Replicas</span><span class="value" id="stat-replicas">-</span></div>
+      <div class="stat"><span class="label">Req/s</span><span class="value" id="stat-request-rate">-</span></div>
+      <div class="stat"><span class="label">CPU</span><span class="value" id="stat-cpu">-</span></div>
+      <div class="stat"><span class="label">Throttled CPU</span><span class="value" id="stat-cpu-throttled">-</span></div>
+      <div class="stat"><span class="label">Memory</span><span class="value" id="stat-memory">-</span></div>
+      <div class="stat"><span class="label">P95 Latency</span><span class="value" id="stat-latency">-</span></div>
+      <div class="stat"><span class="label">Error Rate</span><span class="value" id="stat-error-rate">-</span></div>
+      <div class="stat"><span class="label">Pending Pods</span><span class="value" id="stat-pending">-</span></div>
+      <div class="stat"><span class="label">Restarts</span><span class="value" id="stat-restarts">-</span></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Predictive ramp - <span id="forecast-ramp-model">-</span></h2>
+      <span id="forecast-ramp-window" class="panel-note">-</span>
+    </div>
+    <div class="detail-grid forecast-summary">
+      <div class="detail-item">
+        <span class="label">Now</span>
+        <span class="value" id="forecast-now">-</span>
+      </div>
+      <div class="detail-item">
+        <span class="label">Peak P50</span>
+        <span class="value" id="forecast-peak-p50">-</span>
+      </div>
+      <div class="detail-item">
+        <span class="label">Peak P90</span>
+        <span class="value" id="forecast-peak-p90">-</span>
+      </div>
+      <div class="detail-item">
+        <span class="label">Replicas</span>
+        <span class="value" id="forecast-replicas">-</span>
+      </div>
+      <div class="detail-item">
+        <span class="label">Confidence</span>
+        <span class="value" id="forecast-confidence">-</span>
+      </div>
+      <div class="detail-item">
+        <span class="label">Pod Load</span>
+        <span class="value" id="forecast-pod-load">-</span>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table id="forecast-ramp-table">
+        <thead>
+          <tr>
+            <th class="hint" title="Elapsed time from the latest observation.">Horizon</th>
+            <th class="num hint" title="Lower forecast band for request rate.">P10 Req/s</th>
+            <th class="num hint" title="Median forecast for request rate.">P50 Req/s</th>
+            <th class="num hint" title="Upper forecast band used for capacity sizing.">P90 Req/s</th>
+            <th class="num hint" title="P90 change compared with the latest observed request rate.">P90 Delta</th>
+          </tr>
+        </thead>
+        <tbody id="forecast-ramp-body"></tbody>
+      </table>
     </div>
   </section>
 
   <section class="panel">
     <div class="panel-header">
       <h2>Model comparison</h2>
-      <span class="panel-note">every registered model, evaluated against the same evidence &mdash; select a row to inspect its forecast below</span>
+      <span class="panel-note">all models, same evidence</span>
     </div>
     <div class="table-wrap">
       <table id="model-table">
         <thead>
           <tr>
-            <th class="hint" title="6 forecast models sharing the same request-rate history: naive/seasonal_naive/ewma/linear_trend baselines, auto_ets (statistical), lightgbm_quantile (ML). Click a row to inspect its forecast below.">model</th>
-            <th class="num hint" title="Replica count this model recommends right now, sized to its p90 (worst-case-leaning) demand forecast at 70% target utilization.">recommended</th>
-            <th class="num hint" title="Change from the replica count currently observed.">&Delta; vs current</th>
-            <th class="hint" title="Derived from forecast band width (p90 minus p10) relative to peak demand — a wide uncertainty band lowers confidence, it is not a statistical guarantee.">confidence</th>
-            <th class="num hint" title="This model's highest predicted request rate within the lookahead window, at the 90th percentile.">peak forecast (p90)</th>
-            <th class="num hint" title="Expected load per pod at the recommended replica count, relative to the 70% target.">projected utilization</th>
+            <th class="hint" title="Click a row to inspect its forecast below.">Model</th>
+            <th class="num hint" title="Replica count sized from this model's p90 demand forecast at 70% target utilization.">Replicas</th>
+            <th class="num hint" title="Change from the currently observed replica count.">Delta</th>
+            <th class="hint" title="Derived from forecast band width relative to peak demand.">Confidence</th>
+            <th class="num hint" title="Highest predicted request rate in the lookahead window at p90.">P90 Req/s</th>
+            <th class="num hint" title="Expected percent of per-pod capacity at the recommended replica count.">Pod Load</th>
           </tr>
         </thead>
         <tbody id="model-table-body"></tbody>
@@ -134,29 +211,29 @@
   <section class="panel">
     <div class="panel-header">
       <h2>Replay lab</h2>
-      <span class="panel-note">backtests every model against this workload's real recorded history &mdash; measured error, not a stated preference</span>
-      <button id="replay-run-btn" class="trigger-btn">Run replay</button>
+      <span class="panel-note">recorded-history backtest</span>
+      <button id="replay-run-btn" class="action-btn">Run Replay</button>
     </div>
     <div class="table-wrap">
       <table id="replay-table">
         <thead>
           <tr>
-            <th class="hint" title="Sorted best-first by mean absolute error, measured against this workload's own recorded history.">model</th>
-            <th class="num hint" title="Number of past points backtested — each anchor trains only on data strictly before it, then compares the forecast to what actually happened next.">anchors</th>
-            <th class="num hint" title="Average |actual − forecast| across all backtest anchors, in the same units as request rate. Lower is better.">mean absolute error</th>
-            <th class="num hint" title="Same error expressed as a percentage of the actual value — easier to compare across workloads with different traffic scale. Lower is better.">mean absolute % error</th>
+            <th class="hint" title="Sorted best-first by mean absolute error.">Model</th>
+            <th class="num hint" title="Number of past points backtested.">Anchors</th>
+            <th class="num hint" title="Average absolute difference between actual and forecast values. Lower is better.">MAE</th>
+            <th class="num hint" title="Mean absolute percentage error. Lower is better.">MAPE</th>
           </tr>
         </thead>
         <tbody id="replay-table-body"></tbody>
       </table>
     </div>
-    <span id="replay-status" class="trigger-status">&mdash;</span>
+    <span id="replay-status" class="trigger-status">-</span>
   </section>
 
   <section class="panel chart-panel">
     <div class="panel-header">
-      <h2>Forecast &mdash; <span id="chart-model-name">&mdash;</span></h2>
-      <span class="panel-note">solid line = observed request rate; dashed = selected model's forecast p50 with shaded p10&ndash;p90 band; thin lines = every other registered model's p50, for trajectory comparison</span>
+      <h2>Forecast - <span id="chart-model-name">-</span></h2>
+      <span class="panel-note">observed demand plus selected forecast band</span>
     </div>
     <div class="chart-wrap"><canvas id="request-rate-chart"></canvas></div>
   </section>
@@ -164,21 +241,21 @@
   <section class="panel">
     <div class="panel-header">
       <h2>Raw observations</h2>
-      <span class="panel-note">last 40 simulator ticks, newest first &mdash; unprocessed values as written to storage</span>
+      <span class="panel-note">last 40 rows, newest first</span>
     </div>
     <div class="table-wrap log-wrap">
       <table id="log-table" class="mono">
         <thead>
           <tr>
-            <th>ts</th>
-            <th class="num">replicas</th>
-            <th class="num">req/s</th>
-            <th class="num">cpu%</th>
-            <th class="num">throttled%</th>
-            <th class="num">p95 ms</th>
-            <th class="num">error%</th>
-            <th class="num">pending</th>
-            <th class="num">restarts</th>
+            <th>Time</th>
+            <th class="num">Replicas</th>
+            <th class="num">Req/s</th>
+            <th class="num">CPU%</th>
+            <th class="num">Throttle%</th>
+            <th class="num">P95 ms</th>
+            <th class="num">Error%</th>
+            <th class="num">Pending</th>
+            <th class="num">Restarts</th>
           </tr>
         </thead>
         <tbody id="log-body"></tbody>

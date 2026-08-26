@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import math
+from collections.abc import Mapping
 from typing import TypedDict
 
 import lightgbm as lgb
@@ -20,6 +22,10 @@ logger = logging.getLogger(__name__)
 _MIN_HISTORY = 60
 _QUANTILES = {"p10": 0.10, "p50": 0.50, "p90": 0.90}
 _BASE_LAGS = [1, 2, 3, 5, 10]
+_LIGHTGBM_INT_CONFIG_KEYS = frozenset(
+    {"n_estimators", "num_leaves", "min_child_samples"}
+)
+_LIGHTGBM_CONFIG_KEYS = _LIGHTGBM_INT_CONFIG_KEYS | {"learning_rate"}
 
 
 class LightGbmHyperparameters(TypedDict, total=False):
@@ -29,6 +35,52 @@ class LightGbmHyperparameters(TypedDict, total=False):
     num_leaves: int
     min_child_samples: int
     learning_rate: float
+
+
+def _positive_int_config(raw_config: Mapping[object, object], key: str) -> int:
+    value = raw_config[key]
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"value for {key!r} must be a positive integer")
+    return value
+
+
+def validate_lightgbm_hyperparameters(
+    raw_config: object, source: str
+) -> LightGbmHyperparameters:
+    """Validate operator-supplied LightGBM hyperparameters."""
+    if not isinstance(raw_config, Mapping):
+        raise TypeError(
+            f"{source} must contain a JSON object of LightGBM hyperparameters"
+        )
+
+    unknown_keys = sorted(set(raw_config) - _LIGHTGBM_CONFIG_KEYS)
+    if unknown_keys:
+        raise ValueError(
+            f"{source} contains unsupported LightGBM hyperparameter(s): {unknown_keys}"
+        )
+
+    config: LightGbmHyperparameters = {}
+    if "n_estimators" in raw_config:
+        config["n_estimators"] = _positive_int_config(raw_config, "n_estimators")
+    if "num_leaves" in raw_config:
+        config["num_leaves"] = _positive_int_config(raw_config, "num_leaves")
+    if "min_child_samples" in raw_config:
+        config["min_child_samples"] = _positive_int_config(
+            raw_config, "min_child_samples"
+        )
+    if "learning_rate" in raw_config:
+        value = raw_config["learning_rate"]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value <= 0
+        ):
+            raise ValueError(
+                "value for 'learning_rate' must be a positive finite number"
+            )
+        config["learning_rate"] = float(value)
+    return config
 
 
 class LightGbmQuantileModel:

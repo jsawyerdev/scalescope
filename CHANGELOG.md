@@ -4,6 +4,119 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.11.1]
+
+### Fixed
+
+- Runtime settings now read environment variables when each `Settings`
+  instance is created, validate `SCALESCOPE_MODE`, require tick/history
+  values to be positive, reject an empty OBSERVE namespace scope, and refuse
+  partial Basic Auth configuration instead of silently running unauthenticated.
+- Recommendation responses now report projected pod load against the replica
+  count actually returned to the caller, including low-confidence forecasts and
+  diagnosis-gated "do not scale" decisions.
+- FastAPI lifespan shutdown now awaits the cancelled data-source task before
+  closing DuckDB, avoiding shutdown races between background collection and
+  store teardown.
+- OBSERVE-mode load triggers now return a 502 when the target workload returns
+  invalid or non-object JSON, instead of surfacing a server-side 500.
+- AutoETS now falls back to the naive model if the forecasting library returns
+  an unexpected frame type, instead of depending on a production `assert`.
+- HTTP Basic Auth parsing now accepts case-insensitive auth schemes and rejects
+  malformed base64 or missing `username:password` separators explicitly.
+- Docker builds include `README.md` in the metadata install layer so package
+  `readme` metadata and container builds stay in sync.
+- The in-cluster Deployment can now read Basic Auth credentials from an
+  optional `scalescope-auth` Secret instead of requiring manifest edits.
+
+### Changed
+
+- Added Apache-2.0 licensing, root `NOTICE` attribution for James Sawyer, and
+  package author/license metadata for releasable open-source artifacts.
+- Added `examples/` with copy-paste paths for local advisory mode, local
+  OBSERVE mode, in-cluster advisory mode, in-cluster actuation, Basic Auth, and
+  sustained spike demos, plus namespace-scoped RBAC examples for restricted
+  production deployments.
+- The README now states the product contract up front: ScaleScope is advisory
+  by default and becomes an autoscaler only with OBSERVE mode, explicit
+  actuation config, write RBAC, and no competing HPA on the same Deployment.
+- Centralized LightGBM hyperparameter JSON validation for the app startup path
+  and the SMAC tuning script.
+- Added package `readme` metadata and removed obsolete README roadmap language
+  that described speculative integrations rather than current ScaleScope
+  behaviour.
+- The dashboard predictive ramp now shows projected pod load beside the
+  selected model's replica and confidence values.
+- `scripts/rebuild.sh` now formats the sample workload and tuning script and
+  lints the whole repository with `ruff check .`.
+- Refreshed `requirements-lock.txt` against the current dependency resolution,
+  including `polars==1.44.1`.
+- The configured mypy gate now covers the application, tests, sample workload,
+  and tuning scripts; `prometheus-client` is included in dev dependencies so
+  sample-workload imports are visible during local checks.
+
+## [0.11.0]
+
+### Added
+
+- OBSERVE mode now discovers Deployments across
+  `SCALESCOPE_K8S_NAMESPACES` and stores each workload as
+  `namespace:deployment`, so duplicate deployment names in different
+  namespaces remain selectable and unambiguous in the dashboard.
+- Added `k8s/scalescope/` manifests for an in-cluster observe-only install
+  with a ServiceAccount, read ClusterRole/ClusterRoleBinding, PVC,
+  Deployment, and Service. Optional write permissions live separately in
+  `k8s/scalescope-actuation/`.
+- Observer RBAC now grants only the Deployment, Pod, and PodMetrics
+  `get`/`list` permissions the collector actually uses; actuation write
+  permissions stay in their own optional manifests.
+- Bundled DejaVu Sans Mono Regular for the dashboard and made it the single
+  UI font, so labels, tables, chart legends, and raw metrics render
+  consistently without Google Fonts.
+
+### Fixed
+
+- Transient Kubernetes transport failures from the generated client
+  (`urllib3` timeouts/connection refusals) are now wrapped as
+  availability errors instead of escaping the observe task and silently
+  stopping data collection while `/healthz` remains healthy.
+- `GET /api/source` now marks OBSERVE mode disconnected when the last
+  successful collection timestamp is stale, so dashboards and rebuild
+  checks cannot report days-old data as connected.
+- Low-confidence forecasts now keep the current replica count instead of
+  driving a scale change, preventing zero-confidence model outliers from
+  triggering actuation.
+- OBSERVE-mode trigger calls now refuse selected workloads that do not have
+  a configured trigger/metrics URL instead of sending the request to the
+  single configured primary workload by accident.
+- The dashboard now opens on the configured metrics-enabled OBSERVE target
+  instead of the first alphabetically sorted cluster workload, while still
+  preserving explicit user selections.
+- Chart labels now keep the selected model visible when a model falls back
+  to another forecaster because there is not enough history yet.
+- `scripts/rebuild.sh --observe` now polls parsed JSON readiness for both
+  DEMO and OBSERVE startup checks, avoiding false startup failures while
+  containers are still opening sockets or before the first observe tick.
+
+### Changed
+
+- Dashboard labels and colors were tightened around one neutral/operator
+  palette, with clearer workload/source/load-test wording and a duration
+  selector for 45-second, 2-minute, and 5-minute load triggers.
+- The dashboard and default forecast/recommendation endpoints now start on
+  `ewma` and omit low-confidence
+  non-selected model overlays from the chart while leaving every model in
+  the comparison table.
+- sample-workload's Kubernetes manifest now points at the same registry image
+  used by the live demo cluster, with docs calling out where to replace it
+  for another cluster.
+- sample-workload's CPU stress trigger now uses a bounded single-worker
+  stressor and 5-second health probe timeouts, so sustained demo spikes show
+  pressure without causing liveness flaps under a 200m CPU limit.
+- sample-workload's manual traffic trigger now emits enough synthetic demand
+  to cross the default 3-replica safe-capacity threshold and make scale-up
+  recommendations visible during sustained demos.
+
 ## [0.10.0]
 
 ### Added

@@ -41,12 +41,15 @@ Routes:
 - `POST /trigger?kind={cpu|memory|traffic|stress}&duration_seconds=45` - override
   the background timeline for `duration_seconds`, forcing that load
   pattern immediately. `stress` bypasses the timeline and starts one
-  multiprocessing worker per CPU core, each repeatedly computing Pi digits
-  until the bounded duration expires. This is what ScaleScope's dashboard
+  bounded multiprocessing worker repeatedly computing Pi digits until the
+  bounded duration expires. This is what ScaleScope's dashboard
   "Generate load" buttons call in OBSERVE mode (proxied through
   `POST /api/workloads/{name}/trigger` on the ScaleScope side); call it
   directly here for a quick manual check without going through ScaleScope
   at all: `curl -X POST 'http://<service-ip>/trigger?kind=stress&duration_seconds=30'`.
+  The manual traffic trigger intentionally exceeds the safe capacity of
+  the default 3-replica deployment so a sustained demo produces visible
+  scale-up recommendations.
 
 ## Build the image
 
@@ -68,18 +71,19 @@ k3d image import scalescope-sample-workload:latest
 **Any other cluster reached via `kubectl`** (a managed cluster, a bare-metal
 cluster, a homelab cluster) - kind/k3d's image-load shortcut doesn't apply.
 Push the image to a registry that cluster can pull from, then point the
-Deployment at it:
+Deployment at it. The checked-in manifest is set to this repo's live demo
+registry; replace it with yours before applying in another cluster:
 
 ```
 docker tag scalescope-sample-workload:latest <your-registry>/scalescope-sample-workload:latest
 docker push <your-registry>/scalescope-sample-workload:latest
 ```
 
-Then edit `k8s/deployment.yaml` and replace the placeholder `image:` value
-with `<your-registry>/scalescope-sample-workload:latest` (and set
-`imagePullPolicy: Always` if using a mutable tag). Any registry your
-cluster's nodes can reach works - a cloud registry (ECR/GCR/Docker Hub) or
-a self-hosted one already running in your cluster.
+Then edit `k8s/deployment.yaml` and replace the `image:` value with
+`<your-registry>/scalescope-sample-workload:latest`. Keep
+`imagePullPolicy: Always` if using a mutable tag. Any registry your cluster's
+nodes can reach works - a cloud registry (ECR/GCR/Docker Hub) or a
+self-hosted one already running in your cluster.
 
 ## Deploy
 

@@ -19,6 +19,7 @@ import logging
 
 from kubernetes import client
 from kubernetes.client.rest import ApiException
+from urllib3.exceptions import HTTPError as Urllib3HTTPError
 
 from scalescope.k8s_collector import K8S_REQUEST_TIMEOUT_SECONDS, load_k8s_config
 
@@ -49,6 +50,10 @@ class KubernetesActuator:
             raise ActuationError(
                 f"could not list HorizontalPodAutoscalers in {self._namespace}: {exc.reason}"
             ) from exc
+        except Urllib3HTTPError as exc:
+            raise ActuationError(
+                f"could not list HorizontalPodAutoscalers in {self._namespace}: {exc}"
+            ) from exc
         for hpa in hpas:
             target = hpa.spec.scale_target_ref
             if target.kind == "Deployment" and target.name == deployment_name:
@@ -75,6 +80,10 @@ class KubernetesActuator:
         except ApiException as exc:
             raise ActuationError(
                 f"failed to scale {self._namespace}/{deployment_name} to {replicas}: {exc.reason}"
+            ) from exc
+        except Urllib3HTTPError as exc:
+            raise ActuationError(
+                f"failed to scale {self._namespace}/{deployment_name} to {replicas}: {exc}"
             ) from exc
         logger.info(
             "scaled %s/%s to %d replicas", self._namespace, deployment_name, replicas

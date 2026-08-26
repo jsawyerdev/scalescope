@@ -1,5 +1,6 @@
 const POLL_INTERVAL_MS = 3000;
-const DEFAULT_MODEL = "auto_ets";
+const DEFAULT_MODEL = "ewma";
+const MIN_CHART_OVERLAY_CONFIDENCE = 0.10;
 
 // The multi-model forecast overlay is not urgent evidence like observations
 // or the selected model's band, so it refetches on a slower cadence to avoid
@@ -13,20 +14,17 @@ const AGING_MAX_S = 20;
 // Raw log panel: cap rows kept in the DOM.
 const LOG_MAX_ROWS = 40;
 
-// Muted blue/neutral shades for the non-selected model overlay lines, in
-// the same family as --accent (#2563eb). Kept out of style.css since
-// Chart.js needs raw hex strings rather than CSS custom properties.
-const MODEL_COLORS = {
-  naive: "#8a97a8",
-  seasonal_naive: "#5a6779",
-  ewma: "#60a5fa",
-  linear_trend: "#3b82f6",
-  auto_ets: "#2563eb",
-  lightgbm_quantile: "#1d4ed8",
+const MODEL_COLOR_VARS = {
+  naive: "--chart-naive",
+  seasonal_naive: "--chart-seasonal-naive",
+  ewma: "--chart-ewma",
+  linear_trend: "--chart-linear-trend",
+  auto_ets: "--chart-auto-ets",
+  lightgbm_quantile: "--chart-lightgbm",
 };
-const FALLBACK_MODEL_COLOR = "#8a97a8";
+const FALLBACK_MODEL_COLOR_VAR = "--chart-muted";
 
-// Short fit description per model, shown as a hover tooltip on its name —
+// Short fit description per model, shown as a hover tooltip on its name.
 // mirrors README.md's "Forecast models" table.
 const MODEL_DESCRIPTIONS = {
   naive: "Repeats the last observed value flat. No minimum history. Good on flat stretches, poor on trends or seasonality.",
@@ -44,8 +42,11 @@ let pollTimer = null;
 let allModelForecasts = {};
 let lastMultiModelFetchAt = 0;
 let sourceMode = null;
+let workloadLabels = {};
+let triggerButtonsBusy = false;
 
 const workloadSelect = document.getElementById("workload-select");
+const triggerDurationSelect = document.getElementById("trigger-duration-select");
 const fetchError = document.getElementById("fetch-error");
 
 async function fetchJson(url) {
@@ -75,6 +76,75 @@ function formatDiagnosis(diagnosis) {
   return diagnosis.replace(/_/g, " ");
 }
 
+function targetLabel(workload) {
+  return workloadLabels[workload] || workload;
+}
+
+function sourceTickSeconds(source) {
+  const value = Number(source.tick_seconds);
+  return Number.isFinite(value) && value > 0 ? value : 1;
+}
+
+function formatDuration(seconds) {
+  const total = Math.max(1, Math.round(Number(seconds)));
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  const remaining = total % 60;
+  return remaining ? `${minutes}m ${remaining}s` : `${minutes}m`;
+}
+
+function formatReq(value) {
+  if (!Number.isFinite(value)) return "-";
+  return Math.round(value).toLocaleString();
+}
+
+function signedReqDelta(value) {
+  if (!Number.isFinite(value)) return "-";
+  const rounded = Math.round(value);
+  const sign = rounded > 0 ? "+" : "";
+  return `${sign}${rounded.toLocaleString()}`;
+}
+
+function appendCell(row, text, className = "") {
+  const cell = document.createElement("td");
+  if (className) cell.className = className;
+  cell.textContent = text;
+  row.appendChild(cell);
+  return cell;
+}
+
+function replaceRows(body, rows) {
+  body.replaceChildren(...rows);
+}
+
+function horizonLabel(index, tickSeconds) {
+  return `+${formatDuration((index + 1) * tickSeconds)}`;
+}
+
+function updateWorkloadLabels(source) {
+  workloadLabels = {};
+  for (const target of source.targets || []) {
+    workloadLabels[target.id] = `${target.namespace}/${target.deployment}`;
+  }
+}
+
+function preferredWorkload(workloads, source) {
+  if (currentWorkload && workloads.includes(currentWorkload)) return currentWorkload;
+
+  const metricsTarget = (source.targets || []).find(
+    (target) => target.metrics_url_configured && workloads.includes(target.id)
+  );
+  if (metricsTarget) return metricsTarget.id;
+
+  const configuredTarget =
+    source.k8s_namespace && source.k8s_deployment
+      ? `${source.k8s_namespace}:${source.k8s_deployment}`
+      : null;
+  if (configuredTarget && workloads.includes(configuredTarget)) return configuredTarget;
+
+  return workloads[0];
+}
+
 function severityClass(diagnosis, scalingWillHelp) {
   if (!scalingWillHelp) return "bad";
   if (diagnosis !== "healthy") return "warn";
@@ -88,16 +158,68 @@ function renderEvidence(recommendations) {
   badge.textContent = formatDiagnosis(recommendations.diagnosis);
   badge.className = `badge ${cls}`;
   text.textContent = recommendations.explanation;
-  document.getElementById("source-text").textContent = recommendations.workload;
+  document.getElementById("source-text").textContent = targetLabel(recommendations.workload);
 }
 
-// Shared freshness classification: given an age in seconds, return the dot
-// color class and a human label. Used both for observation freshness and
-// for the source panel's last-successful-collection age.
+function scopeLabel(source) {
+  const namespaces = source.k8s_namespaces || [];
+  if (!namespaces.length) return "-";
+  if (namespaces.length === 1 && namespaces[0] === "*") return "all permitted namespaces";
+  return namespaces.join(", ");
+}
+
+function renderCluster(source) {
+  const statusNote = document.getElementById("cluster-status-note");
+  const serverText = document.getElementById("cluster-server-text");
+  const authText = document.getElementById("cluster-auth-text");
+  const scopeText = document.getElementById("cluster-scope-text");
+  const targetCountText = document.getElementById("cluster-target-count-text");
+  const isObserve = source.mode === "observe";
+
+  if (!isObserve) {
+    statusNote.textContent = "demo simulator";
+    serverText.textContent = "no cluster";
+    authText.textContent = "none";
+    scopeText.textContent = "demo workload";
+    targetCountText.textContent = "1";
+    return;
+  }
+
+  if (source.connected && source.last_success_ts) {
+    const ageS = Math.max(0, (Date.now() - parseTs(source.last_success_ts).getTime()) / 1000);
+    const { label } = classifyFreshness(ageS);
+    statusNote.textContent = `OBSERVE ${label}`;
+  } else {
+    statusNote.textContent = source.connected ? "connected" : "disconnected";
+  }
+
+  const authType = source.cluster_auth_type || "unknown auth";
+  const authIdentity = source.cluster_auth_identity || "identity unavailable";
+  serverText.textContent = source.cluster_server || "cluster initializing";
+  authText.textContent = `${authType} / ${authIdentity}`;
+  scopeText.textContent = scopeLabel(source);
+  targetCountText.textContent = `${(source.targets || []).length}`;
+}
+
+function themeColor(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function modelColor(model) {
+  return themeColor(MODEL_COLOR_VARS[model] || FALLBACK_MODEL_COLOR_VAR);
+}
+
+function selectedForecastLabel(forecast) {
+  if (forecast.model === selectedModel) return selectedModel;
+  return `${selectedModel} via ${forecast.model}`;
+}
+
+// Shared freshness classification for observation age and source collection age.
 function classifyFreshness(ageS) {
-  if (ageS <= FRESH_MAX_S) return { cls: "good", label: `fresh – ${ageS.toFixed(1)}s ago` };
-  if (ageS <= AGING_MAX_S) return { cls: "warn", label: `aging – ${Math.round(ageS)}s ago` };
-  return { cls: "bad", label: `stale – ${Math.round(ageS)}s ago` };
+  const ageLabel = ageS <= FRESH_MAX_S ? `${ageS.toFixed(1)}s ago` : `${Math.round(ageS)}s ago`;
+  if (ageS <= FRESH_MAX_S) return { cls: "good", label: `fresh - ${ageLabel}`, ageLabel };
+  if (ageS <= AGING_MAX_S) return { cls: "warn", label: `aging - ${ageLabel}`, ageLabel };
+  return { cls: "bad", label: `stale - ${ageLabel}`, ageLabel };
 }
 
 function renderFreshness(latestTs) {
@@ -114,8 +236,7 @@ function renderFreshness(latestTs) {
   text.textContent = label;
 }
 
-// Source/identity panel: what ScaleScope is actually connected to (demo
-// simulator vs a real Kubernetes cluster), plus collection health.
+// Source/identity panel: live source identity and collection health.
 function renderSource(source) {
   const modeBadge = document.getElementById("mode-badge");
   const targetText = document.getElementById("source-target-text");
@@ -126,19 +247,24 @@ function renderSource(source) {
 
   const isObserve = source.mode === "observe";
   sourceMode = source.mode;
+  updateTriggerButtons();
   modeBadge.textContent = isObserve ? "OBSERVE" : "DEMO";
   modeBadge.className = isObserve ? "badge mode" : "badge mode demo";
 
+  const selectedTarget = (source.targets || []).find((target) => target.id === currentWorkload);
+  const observingText = selectedTarget
+    ? `${selectedTarget.namespace}/${selectedTarget.deployment}`
+    : (source.k8s_namespaces || []).join(", ");
   targetText.textContent = isObserve
-    ? `${source.cluster_server}\n${source.k8s_namespace} / ${source.k8s_deployment}`
-    : "synthetic data — no cluster connection";
+    ? `${observingText}\n${source.cluster_server}`
+    : "demo simulator - no cluster";
 
   if (source.connected) {
     if (source.last_success_ts) {
       const ageS = Math.max(0, (Date.now() - parseTs(source.last_success_ts).getTime()) / 1000);
-      const { cls, label } = classifyFreshness(ageS);
+      const { cls, ageLabel } = classifyFreshness(ageS);
       connDot.className = `dot ${cls}`;
-      connText.textContent = `connected – last success ${label.split("– ")[1]}`;
+      connText.textContent = `connected - last success ${ageLabel}`;
     } else {
       connDot.className = "dot good";
       connText.textContent = "connected";
@@ -167,10 +293,10 @@ function renderSource(source) {
       const ageS = Math.max(0, (Date.now() - parseTs(source.last_actuation_ts).getTime()) / 1000);
       const { cls } = classifyFreshness(ageS);
       actuationDot.className = `dot ${cls}`;
-      actuationText.textContent = `set replicas=${source.last_actuation_replicas} – ${Math.round(ageS)}s ago`;
+      actuationText.textContent = `set replicas=${source.last_actuation_replicas} - ${Math.round(ageS)}s ago`;
     } else {
       actuationDot.className = "dot";
-      actuationText.textContent = "enabled – no action taken yet";
+      actuationText.textContent = "enabled - no action taken yet";
     }
   } else {
     actuationItem.hidden = true;
@@ -190,46 +316,130 @@ function renderMetrics(latest) {
   document.getElementById("stat-restarts").textContent = latest.restarts;
 }
 
-function deltaCell(recommended, current) {
-  const delta = recommended - current;
-  const cls = delta > 0 ? "positive" : delta < 0 ? "negative" : "zero";
-  const sign = delta > 0 ? "+" : "";
-  return `<span class="delta ${cls}">${sign}${delta}</span>`;
+function rampIndexes(length) {
+  const candidates = [0, 4, 9, 14, 19, length - 1];
+  return [...new Set(candidates)].filter((index) => index >= 0 && index < length);
+}
+
+function renderForecastRamp(latest, forecast, recommendation, source) {
+  const label = selectedForecastLabel(forecast);
+  const tickSeconds = sourceTickSeconds(source);
+  const length = forecast.p50.length;
+  const latestRate = latest ? latest.request_rate : Number.NaN;
+  const peakP50 = length ? Math.max(...forecast.p50) : Number.NaN;
+  const peakP90 = length ? Math.max(...forecast.p90) : Number.NaN;
+
+  document.getElementById("forecast-ramp-model").textContent = label;
+  document.getElementById("forecast-ramp-window").textContent = length
+    ? `${length} steps over ${formatDuration(length * tickSeconds)}`
+    : "waiting for forecast";
+  document.getElementById("forecast-now").textContent = `${formatReq(latestRate)} req/s`;
+  document.getElementById("forecast-peak-p50").textContent = `${formatReq(peakP50)} req/s`;
+  document.getElementById("forecast-peak-p90").textContent = `${formatReq(peakP90)} req/s`;
+
+  if (recommendation) {
+    const delta = recommendation.recommended_replicas - recommendation.current_replicas;
+    const sign = delta > 0 ? "+" : "";
+    document.getElementById(
+      "forecast-replicas"
+    ).textContent = `${recommendation.current_replicas} -> ${recommendation.recommended_replicas} (${sign}${delta})`;
+    document.getElementById("forecast-confidence").textContent = `${Math.round(
+      recommendation.confidence * 100
+    )}%`;
+    document.getElementById("forecast-pod-load").textContent = `${(
+      recommendation.projected_utilization * 100
+    ).toFixed(0)}%`;
+  } else {
+    document.getElementById("forecast-replicas").textContent = "-";
+    document.getElementById("forecast-confidence").textContent = "-";
+    document.getElementById("forecast-pod-load").textContent = "-";
+  }
+
+  const body = document.getElementById("forecast-ramp-body");
+  if (!length) {
+    const row = document.createElement("tr");
+    const cell = appendCell(row, "waiting for forecast...");
+    cell.colSpan = 5;
+    replaceRows(body, [row]);
+    return;
+  }
+
+  const rows = rampIndexes(length).map((index) => {
+    const row = document.createElement("tr");
+    const p90Delta = forecast.p90[index] - latestRate;
+    appendCell(row, horizonLabel(index, tickSeconds));
+    appendCell(row, formatReq(forecast.p10[index]), "num");
+    appendCell(row, formatReq(forecast.p50[index]), "num");
+    appendCell(row, formatReq(forecast.p90[index]), "num");
+    const delta = appendCell(row, "", "num");
+    delta.appendChild(deltaBadge(signedReqDelta(p90Delta), p90Delta));
+    return row;
+  });
+  replaceRows(body, rows);
+}
+
+function deltaBadge(text, value) {
+  const badge = document.createElement("span");
+  badge.className = `delta ${value > 0 ? "positive" : value < 0 ? "negative" : "zero"}`;
+  badge.textContent = text;
+  return badge;
 }
 
 function confidenceCell(confidence) {
   const pct = Math.round(confidence * 100);
-  return `
-    <div class="confidence-cell hint" title="Derived from forecast band width relative to peak demand, not a statistical guarantee.">
-      <div class="confidence-bar"><div class="confidence-bar-fill" style="width:${pct}%"></div></div>
-      <span>${pct}%</span>
-    </div>`;
+  const cell = document.createElement("div");
+  cell.className = "confidence-cell hint";
+  cell.title = "Derived from forecast band width relative to peak demand, not a statistical guarantee.";
+
+  const bar = document.createElement("div");
+  bar.className = "confidence-bar";
+  const fill = document.createElement("div");
+  fill.className = "confidence-bar-fill";
+  fill.style.width = `${pct}%`;
+  bar.appendChild(fill);
+
+  const label = document.createElement("span");
+  label.textContent = `${pct}%`;
+
+  cell.append(bar, label);
+  return cell;
 }
 
 function modelNameCell(model) {
   const description = MODEL_DESCRIPTIONS[model] || "";
-  return `<span class="hint" title="${description}">${model}</span>`;
+  const label = document.createElement("span");
+  label.className = "hint";
+  label.title = description;
+  label.textContent = model;
+  return label;
 }
 
 function renderTable(models) {
   const body = document.getElementById("model-table-body");
-  body.innerHTML = models
-    .map((m) => {
-      const selected = m.model === selectedModel ? "selected" : "";
-      return `
-        <tr class="${selected}" data-model="${m.model}">
-          <td class="model-name">${modelNameCell(m.model)}</td>
-          <td class="num">${m.recommended_replicas}</td>
-          <td class="num">${deltaCell(m.recommended_replicas, m.current_replicas)}</td>
-          <td>${confidenceCell(m.confidence)}</td>
-          <td class="num">${m.peak_forecast_p90.toFixed(0)}</td>
-          <td class="num">${(m.projected_utilization * 100).toFixed(0)}%</td>
-        </tr>`;
-    })
-    .join("");
+  const rows = models.map((m) => {
+    const row = document.createElement("tr");
+    if (m.model === selectedModel) row.className = "selected";
+    row.dataset.model = m.model;
+
+    const modelCell = appendCell(row, "", "model-name");
+    modelCell.appendChild(modelNameCell(m.model));
+    appendCell(row, `${m.recommended_replicas}`, "num");
+
+    const deltaValue = m.recommended_replicas - m.current_replicas;
+    const deltaCell = appendCell(row, "", "num");
+    const sign = deltaValue > 0 ? "+" : "";
+    deltaCell.appendChild(deltaBadge(`${sign}${deltaValue}`, deltaValue));
+
+    const confidence = appendCell(row, "");
+    confidence.appendChild(confidenceCell(m.confidence));
+    appendCell(row, m.peak_forecast_p90.toFixed(0), "num");
+    appendCell(row, `${(m.projected_utilization * 100).toFixed(0)}%`, "num");
+    return row;
+  });
+  replaceRows(body, rows);
   body.querySelectorAll("tr").forEach((row) => {
     row.addEventListener("click", () => {
-      selectedModel = row.dataset.model;
+      selectedModel = row.dataset.model || DEFAULT_MODEL;
       refresh();
     });
   });
@@ -237,33 +447,31 @@ function renderTable(models) {
 
 function renderLog(observations) {
   const body = document.getElementById("log-body");
-  const rows = observations.slice(-LOG_MAX_ROWS).reverse();
-  body.innerHTML = rows
-    .map((o) => {
-      const ts = parseTs(o.ts).toLocaleTimeString();
-      return `
-        <tr>
-          <td>${ts}</td>
-          <td class="num">${o.replicas}</td>
-          <td class="num">${o.request_rate.toFixed(1)}</td>
-          <td class="num">${o.cpu_usage_pct.toFixed(1)}%</td>
-          <td class="num">${o.cpu_throttled_pct.toFixed(1)}%</td>
-          <td class="num">${o.latency_p95_ms.toFixed(0)}</td>
-          <td class="num">${(o.error_rate * 100).toFixed(2)}%</td>
-          <td class="num">${o.pending_pods}</td>
-          <td class="num">${o.restarts}</td>
-        </tr>`;
-    })
-    .join("");
+  const rows = observations.slice(-LOG_MAX_ROWS).reverse().map((o) => {
+    const row = document.createElement("tr");
+    appendCell(row, parseTs(o.ts).toLocaleTimeString());
+    appendCell(row, `${o.replicas}`, "num");
+    appendCell(row, o.request_rate.toFixed(1), "num");
+    appendCell(row, `${o.cpu_usage_pct.toFixed(1)}%`, "num");
+    appendCell(row, `${o.cpu_throttled_pct.toFixed(1)}%`, "num");
+    appendCell(row, o.latency_p95_ms.toFixed(0), "num");
+    appendCell(row, `${(o.error_rate * 100).toFixed(2)}%`, "num");
+    appendCell(row, `${o.pending_pods}`, "num");
+    appendCell(row, `${o.restarts}`, "num");
+    return row;
+  });
+  replaceRows(body, rows);
 }
 
-function updateChart(observations, forecast, allForecasts, modelNames) {
-  document.getElementById("chart-model-name").textContent = forecast.model;
+function updateChart(observations, forecast, allForecasts, modelNames, confidenceByModel, source) {
+  const selectedLabel = selectedForecastLabel(forecast);
+  const tickSeconds = sourceTickSeconds(source);
+  document.getElementById("chart-model-name").textContent = selectedLabel;
 
   const historyLabels = observations.map((o) => new Date(o.ts.endsWith("Z") ? o.ts : `${o.ts}Z`).toLocaleTimeString());
   const historyValues = observations.map((o) => o.request_rate);
   const lastIndex = historyValues.length - 1;
-  const forecastLabels = forecast.p50.map((_, i) => `+${i + 1}`);
+  const forecastLabels = forecast.p50.map((_, i) => horizonLabel(i, tickSeconds));
   const labels = [...historyLabels, ...forecastLabels];
 
   // Anchor forecast series at the last observed point so lines connect visually.
@@ -277,16 +485,16 @@ function updateChart(observations, forecast, allForecasts, modelNames) {
     {
       label: "request rate (observed)",
       data: [...historyValues, ...new Array(forecast.p50.length).fill(null)],
-      borderColor: "#1d4ed8",
+      borderColor: themeColor("--chart-observed"),
       backgroundColor: "transparent",
       borderWidth: 2,
       pointRadius: 0,
       tension: 0.1,
     },
     {
-      label: `${forecast.model} p50 (selected)`,
+      label: `${selectedLabel} p50 (selected)`,
       data: anchorLast(forecast.p50),
-      borderColor: "#2563eb",
+      borderColor: themeColor("--chart-selected"),
       backgroundColor: "transparent",
       borderDash: [4, 4],
       borderWidth: 2,
@@ -294,18 +502,18 @@ function updateChart(observations, forecast, allForecasts, modelNames) {
       tension: 0.1,
     },
     {
-      label: "forecast p90",
+      label: `${selectedModel} p90`,
       data: anchorLast(forecast.p90),
       borderColor: "transparent",
-      backgroundColor: "rgba(37, 99, 235, 0.1)",
+      backgroundColor: themeColor("--chart-band"),
       pointRadius: 0,
       fill: "+1",
     },
     {
-      label: "forecast p10",
+      label: `${selectedModel} p10`,
       data: anchorLast(forecast.p10),
       borderColor: "transparent",
-      backgroundColor: "rgba(37, 99, 235, 0.1)",
+      backgroundColor: themeColor("--chart-band"),
       pointRadius: 0,
       fill: false,
     },
@@ -316,12 +524,13 @@ function updateChart(observations, forecast, allForecasts, modelNames) {
   // full p10-p90 band above; these are the "at a glance" comparison lines.
   for (const name of modelNames || []) {
     if (name === selectedModel) continue;
+    if ((confidenceByModel[name] ?? 1) < MIN_CHART_OVERLAY_CONFIDENCE) continue;
     const other = allForecasts && allForecasts[name];
     if (!other) continue;
     datasets.push({
       label: `${name} p50`,
       data: anchorLast(other.p50),
-      borderColor: MODEL_COLORS[name] || FALLBACK_MODEL_COLOR,
+      borderColor: modelColor(name),
       backgroundColor: "transparent",
       borderWidth: 1,
       pointRadius: 0,
@@ -340,11 +549,18 @@ function updateChart(observations, forecast, allForecasts, modelNames) {
         maintainAspectRatio: false,
         interaction: { mode: "index", intersect: false },
         scales: {
-          x: { ticks: { color: "#5a6779", maxTicksLimit: 12 }, grid: { color: "#dbe3ee" } },
-          y: { ticks: { color: "#5a6779" }, grid: { color: "#dbe3ee" }, beginAtZero: true },
+          x: {
+            ticks: { color: themeColor("--text-muted"), maxTicksLimit: 12 },
+            grid: { color: themeColor("--border") },
+          },
+          y: {
+            ticks: { color: themeColor("--text-muted") },
+            grid: { color: themeColor("--border") },
+            beginAtZero: true,
+          },
         },
         plugins: {
-          legend: { labels: { color: "#101828" } },
+          legend: { labels: { color: themeColor("--text") } },
         },
       },
     });
@@ -357,17 +573,22 @@ function updateChart(observations, forecast, allForecasts, modelNames) {
 
 async function refresh() {
   if (!currentWorkload) return;
+  const workloadPath = encodeURIComponent(currentWorkload);
   try {
     const [observations, recommendations, forecast, source] = await Promise.all([
-      fetchJson(`/api/workloads/${currentWorkload}/observations?limit=200`),
-      fetchJson(`/api/workloads/${currentWorkload}/recommendations`),
-      fetchJson(`/api/workloads/${currentWorkload}/forecast?model=${selectedModel}`),
+      fetchJson(`/api/workloads/${workloadPath}/observations?limit=200`),
+      fetchJson(`/api/workloads/${workloadPath}/recommendations`),
+      fetchJson(`/api/workloads/${workloadPath}/forecast?model=${selectedModel}`),
       fetchJson("/api/source"),
     ]);
+    updateWorkloadLabels(source);
     if (!recommendations.models.some((m) => m.model === selectedModel)) {
       selectedModel = recommendations.models[0].model;
     }
     const modelNames = recommendations.models.map((m) => m.model);
+    const confidenceByModel = Object.fromEntries(
+      recommendations.models.map((m) => [m.model, m.confidence])
+    );
     allModelForecasts[selectedModel] = forecast;
 
     // Refetch the other models' forecasts on a slower cadence than the main
@@ -375,7 +596,7 @@ async function refresh() {
     if (Date.now() - lastMultiModelFetchAt >= MULTI_MODEL_POLL_MS) {
       const others = modelNames.filter((m) => m !== selectedModel);
       const otherForecasts = await Promise.all(
-        others.map((m) => fetchJson(`/api/workloads/${currentWorkload}/forecast?model=${m}`))
+        others.map((m) => fetchJson(`/api/workloads/${workloadPath}/forecast?model=${m}`))
       );
       others.forEach((m, i) => {
         allModelForecasts[m] = otherForecasts[i];
@@ -388,39 +609,52 @@ async function refresh() {
 
     const latest = observations[observations.length - 1];
     renderSource(source);
+    renderCluster(source);
     renderEvidence(recommendations);
     renderFreshness(latest ? latest.ts : null);
     renderMetrics(latest);
+    const selectedRecommendation = recommendations.models.find((m) => m.model === selectedModel);
+    renderForecastRamp(latest, forecast, selectedRecommendation, source);
     renderTable(recommendations.models);
     renderLog(observations);
-    updateChart(observations, forecast, allModelForecasts, modelNames);
+    updateChart(observations, forecast, allModelForecasts, modelNames, confidenceByModel, source);
     fetchError.hidden = true;
   } catch (err) {
     fetchError.hidden = false;
-    fetchError.textContent = `connection error: ${err.message} – showing last known data`;
+    fetchError.textContent = `connection error: ${err.message} - showing last known data`;
   }
 }
 
-const TRIGGER_DURATION_SECONDS = 45;
 const TRIGGER_LABELS = {
-  cpu: "CPU spike",
-  memory: "memory leak",
-  traffic: "traffic spike",
-  stress: "CPU stress",
+  cpu: "Spike CPU",
+  memory: "Leak Memory",
+  traffic: "Spike Traffic",
+  stress: "Stress CPU",
 };
+
+function triggerButtonAvailable(btn) {
+  return btn.dataset.kind !== "stress" || sourceMode === "observe";
+}
+
+function updateTriggerButtons() {
+  document.querySelectorAll(".trigger-btn").forEach((btn) => {
+    btn.disabled = triggerButtonsBusy || !triggerButtonAvailable(btn);
+  });
+}
+
+function setTriggerButtonsBusy(busy) {
+  triggerButtonsBusy = busy;
+  updateTriggerButtons();
+}
+
+function triggerDurationSeconds() {
+  return Number.parseInt(triggerDurationSelect.value, 10);
+}
 
 function wireTriggerButtons() {
   const buttons = document.querySelectorAll(".trigger-btn");
   const status = document.getElementById("trigger-status");
   let countdownTimer = null;
-
-  function isAvailable(btn) {
-    return btn.dataset.kind !== "stress" || sourceMode === "observe";
-  }
-
-  function setBusy(busy) {
-    buttons.forEach((btn) => (btn.disabled = busy || !isAvailable(btn)));
-  }
 
   function startCountdown(kind, endsAt) {
     clearInterval(countdownTimer);
@@ -430,29 +664,31 @@ function wireTriggerButtons() {
         clearInterval(countdownTimer);
         status.textContent = "no trigger active";
         status.classList.remove("active");
-        setBusy(false);
+        setTriggerButtonsBusy(false);
         return;
       }
-      status.textContent = `${TRIGGER_LABELS[kind] || kind} active – ${remaining}s remaining`;
+      status.textContent = `${TRIGGER_LABELS[kind] || kind} active - ${remaining}s remaining`;
     }, 1000);
   }
 
-  setBusy(false);
+  updateTriggerButtons();
   buttons.forEach((btn) => {
     btn.addEventListener("click", async () => {
       if (!currentWorkload) return;
-      setBusy(true);
+      setTriggerButtonsBusy(true);
       status.classList.add("active");
-      status.textContent = `triggering ${TRIGGER_LABELS[btn.dataset.kind] || btn.dataset.kind}…`;
+      status.textContent = `triggering ${TRIGGER_LABELS[btn.dataset.kind] || btn.dataset.kind}...`;
       try {
+        const workloadPath = encodeURIComponent(currentWorkload);
+        const durationSeconds = triggerDurationSeconds();
         await postJson(
-          `/api/workloads/${currentWorkload}/trigger?kind=${btn.dataset.kind}&duration_seconds=${TRIGGER_DURATION_SECONDS}`
+          `/api/workloads/${workloadPath}/trigger?kind=${btn.dataset.kind}&duration_seconds=${durationSeconds}`
         );
-        startCountdown(btn.dataset.kind, Date.now() + TRIGGER_DURATION_SECONDS * 1000);
-        setBusy(false);
+        startCountdown(btn.dataset.kind, Date.now() + durationSeconds * 1000);
+        setTriggerButtonsBusy(false);
       } catch (err) {
         status.textContent = `trigger failed: ${err.message}`;
-        setBusy(false);
+        setTriggerButtonsBusy(false);
       }
     });
   });
@@ -462,17 +698,17 @@ function wireTriggerButtons() {
 // runs on demand rather than on the main 3s poll cycle.
 function renderReplay(result) {
   const body = document.getElementById("replay-table-body");
-  body.innerHTML = result.scores
-    .map(
-      (s, i) => `
-        <tr class="${i === 0 ? "selected" : ""}">
-          <td class="model-name">${modelNameCell(s.model)}</td>
-          <td class="num">${s.n_anchors}</td>
-          <td class="num">${s.mean_absolute_error.toFixed(2)}</td>
-          <td class="num">${s.mean_absolute_pct_error.toFixed(1)}%</td>
-        </tr>`
-    )
-    .join("");
+  const rows = result.scores.map((s, i) => {
+    const row = document.createElement("tr");
+    if (i === 0) row.className = "selected";
+    const modelCell = appendCell(row, "", "model-name");
+    modelCell.appendChild(modelNameCell(s.model));
+    appendCell(row, `${s.n_anchors}`, "num");
+    appendCell(row, s.mean_absolute_error.toFixed(2), "num");
+    appendCell(row, `${s.mean_absolute_pct_error.toFixed(1)}%`, "num");
+    return row;
+  });
+  replaceRows(body, rows);
 }
 
 function wireReplayButton() {
@@ -481,9 +717,10 @@ function wireReplayButton() {
   btn.addEventListener("click", async () => {
     if (!currentWorkload) return;
     btn.disabled = true;
-    status.textContent = "backtesting every model against recorded history…";
+    status.textContent = "backtesting every model against recorded history...";
     try {
-      const result = await fetchJson(`/api/workloads/${currentWorkload}/replay`);
+      const workloadPath = encodeURIComponent(currentWorkload);
+      const result = await fetchJson(`/api/workloads/${workloadPath}/replay`);
       renderReplay(result);
       status.textContent = `${result.n_observations} observations, ${result.scores.length} models scored`;
     } catch (err) {
@@ -495,18 +732,30 @@ function wireReplayButton() {
 }
 
 async function loadWorkloads() {
-  const workloads = await fetchJson("/api/workloads");
+  const [workloads, source] = await Promise.all([
+    fetchJson("/api/workloads"),
+    fetchJson("/api/source"),
+  ]);
+  updateWorkloadLabels(source);
   if (workloads.length === 0) {
     fetchError.hidden = false;
-    fetchError.textContent = "waiting for first observations…";
+    fetchError.textContent = "waiting for first observations...";
     setTimeout(loadWorkloads, POLL_INTERVAL_MS);
     return;
   }
-  workloadSelect.innerHTML = workloads.map((w) => `<option value="${w}">${w}</option>`).join("");
-  currentWorkload = workloads[0];
+  const options = workloads.map((w) => {
+    const option = document.createElement("option");
+    option.value = w;
+    option.textContent = targetLabel(w);
+    return option;
+  });
+  workloadSelect.replaceChildren(...options);
+  currentWorkload = preferredWorkload(workloads, source);
   workloadSelect.value = currentWorkload;
+  workloadSelect.title = targetLabel(currentWorkload);
   workloadSelect.addEventListener("change", () => {
     currentWorkload = workloadSelect.value;
+    workloadSelect.title = targetLabel(currentWorkload);
     selectedModel = DEFAULT_MODEL;
     allModelForecasts = {};
     lastMultiModelFetchAt = 0;

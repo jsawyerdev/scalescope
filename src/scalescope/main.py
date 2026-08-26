@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,8 @@ from scalescope.k8s_actuator import ActuationError, HpaConflictError, Kubernetes
 from scalescope.k8s_collector import (
     KubernetesObservationCollector,
     KubernetesUnavailableError,
+    KubernetesWorkloadTarget,
+    workload_id,
 )
 from scalescope.logging_config import configure_logging
 from scalescope.models.statsforecast_model import AutoEtsModel
@@ -42,10 +44,22 @@ def _init_source_state() -> dict[str, Any]:
             settings.k8s_deployment if settings.mode == "observe" else None
         ),
         "cluster_server": None,
+        "cluster_auth_type": None,
+        "cluster_auth_identity": None,
+        "tick_seconds": settings.simulation_tick_seconds,
         "connected": settings.mode == "demo",
         "last_success_ts": None,
         "last_error": None,
+        "k8s_namespaces": (
+            list(settings.k8s_namespaces) if settings.mode == "observe" else []
+        ),
+        "targets": [],
         "actuate": settings.actuate,
+        "actuation_target": (
+            workload_id(settings.k8s_namespace, settings.k8s_deployment)
+            if settings.mode == "observe" and settings.actuate
+            else None
+        ),
         "last_actuation_ts": None,
         "last_actuation_replicas": None,
         "last_actuation_error": None,
@@ -62,11 +76,31 @@ async def _simulation_loop(store: Store) -> None:
         await asyncio.sleep(settings.simulation_tick_seconds)
 
 
-def _actuate(store: Store, actuator: KubernetesActuator) -> None:
+def _metrics_urls_by_target() -> dict[str, str]:
+    if not settings.k8s_metrics_url:
+        return {}
+    return {
+        workload_id(
+            settings.k8s_namespace,
+            settings.k8s_deployment,
+        ): settings.k8s_metrics_url
+    }
+
+
+def _target_dicts(
+    targets: list[KubernetesWorkloadTarget], metrics_urls: dict[str, str]
+) -> list[dict[str, str | bool]]:
+    return [
+        target.to_dict(metrics_url_configured=target.workload_id in metrics_urls)
+        for target in targets
+    ]
+
+
+def _actuate(
+    store: Store, actuator: KubernetesActuator, target: KubernetesWorkloadTarget
+) -> None:
     source = app_state["source"]
-    df = store.recent_observations(
-        settings.k8s_deployment, settings.history_window_steps
-    )
+    df = store.recent_observations(target.workload_id, settings.history_window_steps)
     if df.is_empty():
         return
 
@@ -84,7 +118,7 @@ def _actuate(store: Store, actuator: KubernetesActuator) -> None:
         return
 
     try:
-        actuator.scale(settings.k8s_deployment, rec.recommended_replicas)
+        actuator.scale(target.deployment, rec.recommended_replicas)
         source["last_actuation_ts"] = datetime.now(UTC)
         source["last_actuation_replicas"] = rec.recommended_replicas
         source["last_actuation_error"] = None
@@ -95,15 +129,20 @@ def _actuate(store: Store, actuator: KubernetesActuator) -> None:
 
 async def _observe_loop(store: Store) -> None:
     source = app_state["source"]
+    metrics_urls = _metrics_urls_by_target()
+    primary_target = KubernetesWorkloadTarget(
+        namespace=settings.k8s_namespace,
+        deployment=settings.k8s_deployment,
+    )
     try:
         collector = await asyncio.to_thread(
             KubernetesObservationCollector,
-            settings.k8s_namespace,
-            settings.k8s_deployment,
-            settings.k8s_kubeconfig,
-            settings.k8s_metrics_url,
+            kubeconfig_path=settings.k8s_kubeconfig,
+            metrics_urls=metrics_urls,
         )
         source["cluster_server"] = collector.cluster_server
+        source["cluster_auth_type"] = collector.auth_type
+        source["cluster_auth_identity"] = collector.auth_identity
     except Exception as exc:
         logger.exception(
             "could not initialize Kubernetes client for %s/%s; observe loop not started",
@@ -126,22 +165,61 @@ async def _observe_loop(store: Store) -> None:
 
     while True:
         try:
-            row = await asyncio.to_thread(collector.collect)
-            store.insert_observation(row)
+            targets = await asyncio.to_thread(
+                collector.list_targets, settings.k8s_namespaces
+            )
+            source["targets"] = _target_dicts(targets, metrics_urls)
+            if not targets:
+                raise KubernetesUnavailableError(
+                    f"no deployments visible in namespaces {settings.k8s_namespaces}"
+                )
+
+            target_errors: list[str] = []
+            rows_inserted = 0
+            for target in targets:
+                try:
+                    row = await asyncio.to_thread(collector.collect, target)
+                except KubernetesUnavailableError as exc:
+                    target_errors.append(str(exc))
+                    continue
+                store.insert_observation(row)
+                rows_inserted += 1
+                if actuator is not None and target == primary_target:
+                    await asyncio.to_thread(_actuate, store, actuator, target)
+
+            if rows_inserted == 0:
+                raise KubernetesUnavailableError(
+                    "; ".join(target_errors) or "no observations collected this tick"
+                )
+
             source["connected"] = True
             source["last_success_ts"] = datetime.now(UTC)
-            source["last_error"] = None
-            if actuator is not None:
-                await asyncio.to_thread(_actuate, store, actuator)
+            source["last_error"] = (
+                f"{len(target_errors)} target(s) failed: {target_errors[0]}"
+                if target_errors
+                else None
+            )
         except KubernetesUnavailableError as exc:
             logger.warning(
-                "deployment %s/%s unreachable this tick",
-                settings.k8s_namespace,
-                settings.k8s_deployment,
+                "Kubernetes observation failed for namespaces %s",
+                settings.k8s_namespaces,
             )
             source["connected"] = False
             source["last_error"] = str(exc)
         await asyncio.sleep(settings.simulation_tick_seconds)
+
+
+def _record_background_failure(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception as exc:
+        logger.exception("data source task stopped unexpectedly")
+        source = app_state.get("source")
+        if source is not None:
+            source["connected"] = False
+            source["last_error"] = f"data source task stopped: {exc}"
 
 
 @asynccontextmanager
@@ -153,22 +231,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     task: asyncio.Task | None = None
     if settings.mode == "demo":
         task = asyncio.create_task(_simulation_loop(store))
+        task.add_done_callback(_record_background_failure)
         logger.info("demo simulation loop started")
     elif settings.mode == "observe":
         task = asyncio.create_task(_observe_loop(store))
+        task.add_done_callback(_record_background_failure)
         logger.info(
             "observe loop started for %s/%s",
             settings.k8s_namespace,
             settings.k8s_deployment,
         )
     else:
-        logger.warning("mode=%s not implemented; no data source running", settings.mode)
+        raise RuntimeError(f"unsupported ScaleScope mode: {settings.mode}")
 
-    yield
-
-    if task is not None:
-        task.cancel()
-    store.close()
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        store.close()
 
 
 app = FastAPI(title="ScaleScope", lifespan=lifespan)

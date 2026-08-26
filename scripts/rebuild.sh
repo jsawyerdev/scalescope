@@ -62,6 +62,14 @@ curl_auth() {
     fi
 }
 
+json_field_true() {
+    python -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get(sys.argv[1]) is True else 1)' "$1"
+}
+
+json_list_contains() {
+    python -c 'import json, sys; raise SystemExit(0 if sys.argv[1] in json.load(sys.stdin) else 1)' "$1"
+}
+
 if [ "$WITH_OBSERVE" -eq 1 ]; then
     if [ ! -f "$KUBECONFIG_PATH" ]; then
         echo "ERROR: --observe requires a kubeconfig at $KUBECONFIG_PATH" >&2
@@ -104,10 +112,10 @@ echo "== recording resolved versions -> $LOCK_FILE =="
 pip freeze --exclude-editable > "$LOCK_FILE"
 
 echo "== formatting =="
-black src tests
+black src tests sample-workload/app scripts/tune
 
 echo "== lint =="
-ruff check src tests
+ruff check .
 
 echo "== tests =="
 pytest -q
@@ -132,7 +140,13 @@ for _ in $(seq 1 30); do
     fi
     sleep 1
 done
-curl_auth -sf "$DEMO_URL/api/workloads" | grep -q payments-api
+for _ in $(seq 1 30); do
+    if curl_auth -sf "$DEMO_URL/api/workloads" | json_list_contains payments-api; then
+        break
+    fi
+    sleep 1
+done
+curl_auth -sf "$DEMO_URL/api/workloads" | json_list_contains payments-api
 
 if [ "$WITH_OBSERVE" -eq 1 ]; then
     for _ in $(seq 1 30); do
@@ -141,7 +155,13 @@ if [ "$WITH_OBSERVE" -eq 1 ]; then
         fi
         sleep 1
     done
-    curl_auth -sf "$OBSERVE_URL/api/source" | grep -q '"connected":true'
+    for _ in $(seq 1 30); do
+        if curl_auth -sf "$OBSERVE_URL/api/source" | json_field_true connected; then
+            break
+        fi
+        sleep 1
+    done
+    curl_auth -sf "$OBSERVE_URL/api/source" | json_field_true connected
 fi
 trap - ERR
 

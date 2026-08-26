@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-import math
 import threading
+from datetime import UTC, datetime
 from importlib.metadata import version as _package_version
 from pathlib import Path
 from typing import Any
@@ -13,9 +13,14 @@ import httpx
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query
 
-from scalescope.capacity import STARTUP_LEAD_STEPS, recommend_replicas
+from scalescope.capacity import (
+    CAPACITY_PER_POD_RPS,
+    STARTUP_LEAD_STEPS,
+    recommend_replicas,
+)
 from scalescope.config import settings
 from scalescope.diagnosis import DiagnosisResult, diagnose
+from scalescope.k8s_collector import workload_id
 from scalescope.models.base import Forecast, ForecastModel
 from scalescope.models.baselines import (
     EwmaModel,
@@ -26,28 +31,13 @@ from scalescope.models.baselines import (
 from scalescope.models.lightgbm_model import (
     LightGbmHyperparameters,
     LightGbmQuantileModel,
+    validate_lightgbm_hyperparameters,
 )
 from scalescope.models.statsforecast_model import AutoEtsModel
 from scalescope.replay import replay_score
 from scalescope.storage import Store
 
 router = APIRouter(prefix="/api")
-
-
-_LIGHTGBM_INT_CONFIG_KEYS = frozenset(
-    {"n_estimators", "num_leaves", "min_child_samples"}
-)
-_LIGHTGBM_CONFIG_KEYS = _LIGHTGBM_INT_CONFIG_KEYS | {"learning_rate"}
-
-
-def _positive_int_lightgbm_config(raw_config: dict[Any, Any], key: str) -> int:
-    value = raw_config[key]
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise RuntimeError(
-            "SCALESCOPE_LIGHTGBM_CONFIG_PATH value for "
-            f"{key!r} must be a positive integer"
-        )
-    return value
 
 
 def _load_lightgbm_config(path: str | None) -> LightGbmHyperparameters:
@@ -73,46 +63,12 @@ def _load_lightgbm_config(path: str | None) -> LightGbmHyperparameters:
             "SCALESCOPE_LIGHTGBM_CONFIG_PATH could not be read: " f"{config_path}"
         ) from exc
 
-    if not isinstance(raw_config, dict):
-        raise TypeError(
-            "SCALESCOPE_LIGHTGBM_CONFIG_PATH must contain a JSON object of "
-            "LightGBM hyperparameters"
+    try:
+        return validate_lightgbm_hyperparameters(
+            raw_config, source="SCALESCOPE_LIGHTGBM_CONFIG_PATH"
         )
-
-    unknown_keys = sorted(set(raw_config) - _LIGHTGBM_CONFIG_KEYS)
-    if unknown_keys:
-        raise RuntimeError(
-            "SCALESCOPE_LIGHTGBM_CONFIG_PATH contains unsupported LightGBM "
-            f"hyperparameter(s): {unknown_keys}"
-        )
-
-    config: LightGbmHyperparameters = {}
-    if "n_estimators" in raw_config:
-        config["n_estimators"] = _positive_int_lightgbm_config(
-            raw_config, "n_estimators"
-        )
-    if "num_leaves" in raw_config:
-        config["num_leaves"] = _positive_int_lightgbm_config(raw_config, "num_leaves")
-    if "min_child_samples" in raw_config:
-        config["min_child_samples"] = _positive_int_lightgbm_config(
-            raw_config, "min_child_samples"
-        )
-
-    if "learning_rate" in raw_config:
-        value = raw_config["learning_rate"]
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(float(value))
-            or value <= 0
-        ):
-            raise RuntimeError(
-                "SCALESCOPE_LIGHTGBM_CONFIG_PATH value for 'learning_rate' "
-                "must be a positive finite number"
-            )
-        config["learning_rate"] = float(value)
-
-    return config
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 _MODELS: dict[str, ForecastModel] = {
@@ -125,10 +81,11 @@ _MODELS: dict[str, ForecastModel] = {
         **_load_lightgbm_config(settings.lightgbm_config_path)
     ),
 }
-_DEFAULT_MODEL = "auto_ets"
+_DEFAULT_MODEL = "ewma"
 _HORIZON_STEPS = settings.forecast_horizon_steps
 _HISTORY_STEPS = settings.history_window_steps
 _MAX_OBSERVATIONS_LIMIT = 5000
+_SOURCE_STALE_AFTER_SECONDS = max(30.0, settings.simulation_tick_seconds * 5)
 # The smallest per-model minimum history (baselines.py's NaiveModel); every
 # model falls back to a naive forecast below its own threshold, so this is
 # the only floor replay_score needs to produce a comparable anchor for all six.
@@ -157,6 +114,19 @@ def get_source() -> dict[str, Any]:
     from scalescope.main import app_state
 
     source: dict[str, Any] = dict(app_state["source"])
+    last_success = source.get("last_success_ts")
+    if (
+        source.get("mode") == "observe"
+        and source.get("connected")
+        and isinstance(last_success, datetime)
+    ):
+        age_seconds = (datetime.now(UTC) - last_success).total_seconds()
+        if age_seconds > _SOURCE_STALE_AFTER_SECONDS:
+            source["connected"] = False
+            source["last_error"] = (
+                source.get("last_error")
+                or f"last successful collection is stale ({int(age_seconds)}s old)"
+            )
     source["version"] = _VERSION
     return source
 
@@ -182,7 +152,21 @@ def _get_forecast(workload: str, model: str, df: pl.DataFrame) -> Forecast:
 
 @router.get("/workloads")
 def list_workloads() -> list[str]:
-    return get_store().workloads()
+    workloads = set(get_store().workloads())
+    if settings.mode == "observe":
+        from scalescope.main import app_state
+
+        source = app_state.get("source", {})
+        target_ids: list[str] = []
+        for target in source.get("targets", []):
+            if not isinstance(target, dict):
+                continue
+            target_id = target.get("id")
+            if isinstance(target_id, str) and target_id in workloads:
+                target_ids.append(target_id)
+        if target_ids:
+            return sorted(target_ids)
+    return sorted(workloads)
 
 
 @router.get("/workloads/{workload}/observations")
@@ -244,6 +228,11 @@ def _compute_recommendation(
     recommended_replicas = (
         rec.recommended_replicas if diag.scaling_will_help else current_replicas
     )
+    projected_utilization = (
+        rec.peak_forecast_p90 / (recommended_replicas * CAPACITY_PER_POD_RPS)
+        if recommended_replicas
+        else 0.0
+    )
 
     return {
         "workload": workload,
@@ -251,7 +240,7 @@ def _compute_recommendation(
         "current_replicas": rec.current_replicas,
         "recommended_replicas": recommended_replicas,
         "peak_forecast_p90": rec.peak_forecast_p90,
-        "projected_utilization": rec.projected_utilization,
+        "projected_utilization": projected_utilization,
         "confidence": rec.confidence,
         "scaling_will_help": diag.scaling_will_help,
         "diagnosis": diag.diagnosis.value,
@@ -396,6 +385,15 @@ def trigger_fault(
                     "route to the workload to trigger a fault"
                 ),
             )
+        trigger_workload = workload_id(settings.k8s_namespace, settings.k8s_deployment)
+        if workload != trigger_workload:
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "no trigger route is configured for this workload; "
+                    f"SCALESCOPE_K8S_METRICS_URL is attached to {trigger_workload}"
+                ),
+            )
         base_url = settings.k8s_metrics_url.removesuffix("/metrics")
         try:
             response = httpx.post(
@@ -408,12 +406,23 @@ def trigger_fault(
             raise HTTPException(
                 status_code=502, detail=f"could not reach workload: {exc}"
             ) from exc
+        try:
+            response_body = response.json()
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=502, detail=f"workload returned invalid JSON: {exc}"
+            ) from exc
+        if not isinstance(response_body, dict):
+            raise HTTPException(
+                status_code=502,
+                detail="workload trigger response must be a JSON object",
+            )
         return {
             "workload": workload,
             "kind": kind,
             "duration_seconds": duration_seconds,
             "target": base_url,
-            **response.json(),
+            **response_body,
         }
 
     raise HTTPException(

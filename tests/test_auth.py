@@ -28,20 +28,20 @@ def _app() -> FastAPI:
     return app
 
 
-def test_healthz_exempt_without_credentials():
+def test_healthz_exempt_without_credentials() -> None:
     client = TestClient(_app())
     response = client.get("/healthz")
     assert response.status_code == 200
 
 
-def test_protected_route_rejects_missing_credentials():
+def test_protected_route_rejects_missing_credentials() -> None:
     client = TestClient(_app())
     response = client.get("/protected")
     assert response.status_code == 401
     assert response.headers["www-authenticate"] == 'Basic realm="ScaleScope"'
 
 
-def test_protected_route_rejects_wrong_credentials():
+def test_protected_route_rejects_wrong_credentials() -> None:
     client = TestClient(_app())
     response = client.get(
         "/protected", headers={"Authorization": _basic_header("operator", "wrong")}
@@ -49,7 +49,7 @@ def test_protected_route_rejects_wrong_credentials():
     assert response.status_code == 401
 
 
-def test_protected_route_accepts_correct_credentials():
+def test_protected_route_accepts_correct_credentials() -> None:
     client = TestClient(_app())
     response = client.get(
         "/protected", headers={"Authorization": _basic_header("operator", "s3cret")}
@@ -58,9 +58,29 @@ def test_protected_route_accepts_correct_credentials():
     assert response.json() == {"data": "secret"}
 
 
-def test_malformed_authorization_header_rejected():
+def test_authorization_scheme_is_case_insensitive() -> None:
+    client = TestClient(_app())
+    response = client.get(
+        "/protected",
+        headers={
+            "Authorization": _basic_header("operator", "s3cret").replace(
+                "Basic", "basic"
+            )
+        },
+    )
+    assert response.status_code == 200
+
+
+def test_malformed_authorization_header_rejected() -> None:
     client = TestClient(_app())
     response = client.get(
         "/protected", headers={"Authorization": "Basic not-valid-base64!!"}
     )
+    assert response.status_code == 401
+
+
+def test_authorization_header_without_colon_rejected() -> None:
+    client = TestClient(_app())
+    token = base64.b64encode(b"operator").decode()
+    response = client.get("/protected", headers={"Authorization": f"Basic {token}"})
     assert response.status_code == 401

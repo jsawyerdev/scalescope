@@ -38,12 +38,15 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
 
     def _authorized(self, request: Request) -> bool:
         header = request.headers.get("authorization", "")
-        if not header.startswith("Basic "):
+        scheme, _, credentials = header.partition(" ")
+        if scheme.lower() != "basic" or not credentials:
             return False
         try:
-            decoded = base64.b64decode(header[len("Basic ") :]).decode("utf-8")
-            username, _, password = decoded.partition(":")
+            decoded = base64.b64decode(credentials, validate=True).decode("utf-8")
+            username, separator, password = decoded.partition(":")
         except binascii.Error, UnicodeDecodeError:
+            return False
+        if not separator:
             return False
         # Constant-time comparison: a timing difference between a wrong
         # username and a wrong password would leak which one was correct.

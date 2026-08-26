@@ -45,10 +45,11 @@ packaging==26.3
 pandas==2.3.3
 pathspec==1.1.1
 patsy==1.0.2
-platformdirs==4.11.3
+platformdirs==4.11.4
 pluggy==1.6.0
-polars==1.43.2
-polars-runtime-32==1.43.2
+polars==1.44.1
+polars-runtime-32==1.44.1
+prometheus_client==0.26.0
 propcache==0.5.2
 pyarrow==25.0.1
 pydantic==2.13.4
@@ -64,7 +65,7 @@ requests==2.34.2
 requests-oauthlib==2.0.0
 ruff==0.16.4
 scikit-learn==1.9.0
-scipy==1.18.0
+scipy==1.18.1
 six==1.17.0
 SQLAlchemy==2.0.52
 starlette==1.6.0

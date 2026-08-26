@@ -46,6 +46,7 @@ _HASH_INPUT = b"scalescope-sample-workload-load-generator"
 _TICK_SECONDS = float(os.environ.get("SIM_TICK_SECONDS", "1.0"))
 _LATENCY_WINDOW_SIZE = 200
 _STRESS_PI_DIGITS = 500
+_STRESS_WORKERS = 1
 _STRESS_PHASE = "manual_cpu_stress"
 
 # Plain instantaneous gauges (not counters needing PromQL rate()) so a
@@ -148,7 +149,7 @@ _LEAK_CAP_BYTES = 90 * 1024 * 1024
 _TRIGGER_PHASES = {
     "cpu": _LoadPhase("manual_cpu_spike", 0, (150, 220), 0.0, 0),
     "memory": _LoadPhase("manual_memory_leak", 0, (10, 20), 0.0, 400_000),
-    "traffic": _LoadPhase("manual_traffic_spike", 0, (80, 130), 0.02, 0),
+    "traffic": _LoadPhase("manual_traffic_spike", 0, (520, 700), 0.02, 0),
 }
 
 _manual_override: _LoadPhase | None = None
@@ -165,12 +166,10 @@ class _StressRun:
 
     def __init__(
         self,
-        run_id: int,
         stop_event: MultiprocessingEvent,
         processes: list[multiprocessing.Process],
         ends_at: float,
     ) -> None:
-        self.run_id = run_id
         self.stop_event = stop_event
         self.processes = processes
         self.ends_at = ends_at
@@ -331,7 +330,7 @@ def _start_stress(duration_seconds: int) -> _StressRun:
     global _stress_run
 
     _stop_stress_run()
-    worker_count = os.cpu_count() or 1
+    worker_count = _STRESS_WORKERS
     stop_event = multiprocessing.Event()
     processes = [
         multiprocessing.Process(
@@ -342,7 +341,6 @@ def _start_stress(duration_seconds: int) -> _StressRun:
         for _ in range(worker_count)
     ]
     run = _StressRun(
-        run_id=time.monotonic_ns(),
         stop_event=stop_event,
         processes=processes,
         ends_at=time.monotonic() + duration_seconds,
@@ -361,8 +359,13 @@ def _start_stress(duration_seconds: int) -> _StressRun:
     return run
 
 
+def _describe_stress_workers(worker_count: int) -> str:
+    noun = "process" if worker_count == 1 else "processes"
+    return f"saturating {worker_count} CPU worker {noun}"
+
+
 async def _load_simulator() -> None:
-    rng = random.Random()
+    rng = random.SystemRandom()
     last_phase_name: str | None = None
     while True:
         phase = _current_phase(time.time())
@@ -473,7 +476,7 @@ async def trigger(
         return {
             "kind": kind,
             "phase": _STRESS_PHASE,
-            "description": f"saturating {run.worker_count} CPU worker processes",
+            "description": _describe_stress_workers(run.worker_count),
             "duration_seconds": duration_seconds,
         }
     if kind not in _TRIGGER_PHASES:

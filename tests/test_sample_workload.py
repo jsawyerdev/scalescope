@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 from fastapi import HTTPException
@@ -14,7 +16,7 @@ from scalescope.api import routes
 
 
 @pytest.fixture(scope="session")
-def sample_workload() -> ModuleType:
+def sample_workload() -> Any:
     _install_prometheus_stub()
     module_path = Path(__file__).parents[1] / "sample-workload" / "app" / "main.py"
     spec = importlib.util.spec_from_file_location("sample_workload_main", module_path)
@@ -27,14 +29,10 @@ def sample_workload() -> ModuleType:
 
 
 def _install_prometheus_stub() -> None:
-    try:
-        import prometheus_client
-
+    if importlib.util.find_spec("prometheus_client") is not None:
         return
-    except ModuleNotFoundError:
-        pass
 
-    prometheus_client = ModuleType("prometheus_client")
+    prometheus_client: Any = ModuleType("prometheus_client")
 
     class Metric:
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -61,7 +59,7 @@ def _install_prometheus_stub() -> None:
 
 
 @pytest.fixture(autouse=True)
-def reset_sample_workload_state(sample_workload: ModuleType) -> None:
+def reset_sample_workload_state(sample_workload: Any) -> None:
     sample_workload._manual_override = None
     sample_workload._manual_override_until = 0.0
     with sample_workload._timeline_lock:
@@ -71,12 +69,12 @@ def reset_sample_workload_state(sample_workload: ModuleType) -> None:
 
 
 def test_sample_workload_stress_trigger_uses_stress_runner(
-    sample_workload: ModuleType, monkeypatch: pytest.MonkeyPatch
+    sample_workload: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     durations: list[int] = []
 
     class FakeStressRun:
-        worker_count = 4
+        worker_count = 1
 
     def fake_start_stress(duration_seconds: int) -> FakeStressRun:
         durations.append(duration_seconds)
@@ -91,7 +89,7 @@ def test_sample_workload_stress_trigger_uses_stress_runner(
     assert response.json() == {
         "kind": "stress",
         "phase": "manual_cpu_stress",
-        "description": "saturating 4 CPU worker processes",
+        "description": "saturating 1 CPU worker process",
         "duration_seconds": 5,
     }
     assert durations == [5]
@@ -99,12 +97,12 @@ def test_sample_workload_stress_trigger_uses_stress_runner(
 
 
 def test_sample_workload_pi_computation_is_deterministic(
-    sample_workload: ModuleType,
+    sample_workload: Any,
 ) -> None:
     assert sample_workload._compute_pi_digits(20) == "3.14159265358979323846"
 
 
-def test_timeline_pause_freezes_base_phase(sample_workload: ModuleType) -> None:
+def test_timeline_pause_freezes_base_phase(sample_workload: Any) -> None:
     assert sample_workload._pause_timeline(now=70.0) == {
         "paused": True,
         "paused_since": "1970-01-01T00:01:10+00:00",
@@ -120,7 +118,7 @@ def test_timeline_pause_freezes_base_phase(sample_workload: ModuleType) -> None:
 
 
 def test_timeline_resume_returns_to_wall_clock_phase(
-    sample_workload: ModuleType,
+    sample_workload: Any,
 ) -> None:
     sample_workload._pause_timeline(now=70.0)
 
@@ -132,7 +130,7 @@ def test_timeline_resume_returns_to_wall_clock_phase(
 
 
 def test_manual_override_still_wins_while_timeline_paused(
-    sample_workload: ModuleType,
+    sample_workload: Any,
 ) -> None:
     sample_workload._pause_timeline(now=70.0)
     sample_workload._manual_override = sample_workload._TRIGGER_PHASES["cpu"]
@@ -143,7 +141,7 @@ def test_manual_override_still_wins_while_timeline_paused(
 
 
 def test_timeline_endpoints_report_pause_and_resume(
-    sample_workload: ModuleType,
+    sample_workload: Any,
 ) -> None:
     client = TestClient(sample_workload.app)
 
@@ -197,7 +195,9 @@ def test_scalescope_observe_proxies_stress_trigger(
     )
     monkeypatch.setattr(routes.httpx, "post", fake_post)
 
-    result = routes.trigger_fault("payments-api", kind="stress", duration_seconds=5)
+    result = routes.trigger_fault(
+        "scalescope-demo:sample-workload", kind="stress", duration_seconds=5
+    )
 
     assert calls == [
         (
@@ -207,9 +207,62 @@ def test_scalescope_observe_proxies_stress_trigger(
         )
     ]
     assert result == {
-        "workload": "payments-api",
+        "workload": "scalescope-demo:sample-workload",
         "kind": "stress",
         "duration_seconds": 5,
         "target": "http://sample-workload",
         "phase": "manual_cpu_stress",
     }
+
+
+def test_scalescope_observe_rejects_trigger_for_unconfigured_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        routes,
+        "settings",
+        replace(
+            routes.settings,
+            mode="observe",
+            k8s_metrics_url="http://sample-workload/metrics",
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        routes.trigger_fault("other-ns:other-api", kind="stress", duration_seconds=5)
+
+    assert exc_info.value.status_code == 501
+    assert "no trigger route is configured" in exc_info.value.detail
+
+
+def test_scalescope_observe_rejects_invalid_trigger_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, object]:
+            raise json.JSONDecodeError("bad json", "", 0)
+
+    def fake_post(url: str, params: dict[str, object], timeout: float) -> FakeResponse:
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        routes,
+        "settings",
+        replace(
+            routes.settings,
+            mode="observe",
+            k8s_metrics_url="http://sample-workload/metrics",
+        ),
+    )
+    monkeypatch.setattr(routes.httpx, "post", fake_post)
+
+    with pytest.raises(HTTPException) as exc_info:
+        routes.trigger_fault(
+            "scalescope-demo:sample-workload", kind="stress", duration_seconds=5
+        )
+
+    assert exc_info.value.status_code == 502
+    assert "invalid JSON" in exc_info.value.detail

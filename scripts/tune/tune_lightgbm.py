@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -21,6 +20,7 @@ from smac import HyperparameterOptimizationFacade, Scenario
 from scalescope.models.lightgbm_model import (
     LightGbmHyperparameters,
     LightGbmQuantileModel,
+    validate_lightgbm_hyperparameters,
 )
 from scalescope.replay import replay_score
 from scalescope.storage import Store
@@ -28,10 +28,7 @@ from scalescope.storage import Store
 _MAX_REPLAY_OBSERVATIONS = 5000
 _REPLAY_MIN_HISTORY = 8
 _DEFAULT_WORKLOAD = "payments-api"
-_LIGHTGBM_INT_CONFIG_KEYS = frozenset(
-    {"n_estimators", "num_leaves", "min_child_samples"}
-)
-_LIGHTGBM_CONFIG_KEYS = _LIGHTGBM_INT_CONFIG_KEYS | {"learning_rate"}
+_ConfigValue = int | float | str
 
 
 def _positive_int(value: str) -> int:
@@ -69,58 +66,33 @@ def _configuration_space() -> ConfigurationSpace:
 def _params_from_mapping(
     values: Mapping[str, object],
 ) -> LightGbmHyperparameters:
+    n_estimators = _numeric_config_value(values, "n_estimators")
+    num_leaves = _numeric_config_value(values, "num_leaves")
+    min_child_samples = _numeric_config_value(values, "min_child_samples")
+    learning_rate = _numeric_config_value(values, "learning_rate")
     return {
-        "n_estimators": int(values["n_estimators"]),
-        "num_leaves": int(values["num_leaves"]),
-        "min_child_samples": int(values["min_child_samples"]),
-        "learning_rate": float(values["learning_rate"]),
+        "n_estimators": int(n_estimators),
+        "num_leaves": int(num_leaves),
+        "min_child_samples": int(min_child_samples),
+        "learning_rate": float(learning_rate),
     }
+
+
+def _numeric_config_value(values: Mapping[str, object], key: str) -> _ConfigValue:
+    value = values[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise TypeError(f"SMAC config value {key!r} must be numeric")
+    return value
 
 
 def _params_from_configuration(config: Configuration) -> LightGbmHyperparameters:
     return _params_from_mapping(config.get_dictionary())
 
 
-def _positive_int_config(raw_config: Mapping[str, object], key: str) -> int:
-    value = raw_config[key]
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ValueError(f"{key!r} must be a positive integer")
-    return value
-
-
 def _load_hyperparameter_config(path: Path) -> LightGbmHyperparameters:
     with path.open(encoding="utf-8") as f:
         raw_config = json.load(f)
-
-    if not isinstance(raw_config, dict):
-        raise TypeError("baseline config must contain a JSON object")
-
-    unknown_keys = sorted(set(raw_config) - _LIGHTGBM_CONFIG_KEYS)
-    if unknown_keys:
-        raise ValueError(
-            f"baseline config contains unsupported LightGBM key(s): {unknown_keys}"
-        )
-
-    config: LightGbmHyperparameters = {}
-    if "n_estimators" in raw_config:
-        config["n_estimators"] = _positive_int_config(raw_config, "n_estimators")
-    if "num_leaves" in raw_config:
-        config["num_leaves"] = _positive_int_config(raw_config, "num_leaves")
-    if "min_child_samples" in raw_config:
-        config["min_child_samples"] = _positive_int_config(
-            raw_config, "min_child_samples"
-        )
-    if "learning_rate" in raw_config:
-        value = raw_config["learning_rate"]
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(float(value))
-            or value <= 0
-        ):
-            raise ValueError("'learning_rate' must be a positive finite number")
-        config["learning_rate"] = float(value)
-    return config
+    return validate_lightgbm_hyperparameters(raw_config, source="baseline config")
 
 
 def _load_history(db_path: Path, workload: str) -> np.ndarray:

@@ -12,10 +12,12 @@ import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
 
+from scalescope.capacity import CAPACITY_PER_POD_RPS
 from scalescope.main import app, app_state
 from scalescope.storage import Store
 
@@ -39,14 +41,14 @@ def client() -> Iterator[TestClient]:
 @pytest.fixture
 def store(client: TestClient) -> Store:
     """The same Store instance the running app's routes read/write."""
-    return app_state["store"]
+    return cast(Store, app_state["store"])
 
 
 def _workload_name() -> str:
     return f"wl-{uuid.uuid4().hex[:12]}"
 
 
-def _observation(ts: datetime, workload: str, **overrides: object) -> dict:
+def _observation(ts: datetime, workload: str, **overrides: object) -> dict[str, object]:
     base = {
         "ts": ts,
         "workload": workload,
@@ -75,6 +77,59 @@ def seed_observations(store: Store, workload: str, n: int) -> None:
                 request_rate=1000.0 + i,
             )
         )
+
+
+def test_source_reports_stale_observe_collection_as_disconnected(
+    client: TestClient,
+) -> None:
+    original_source = dict(app_state["source"])
+    app_state["source"].update(
+        {
+            "mode": "observe",
+            "connected": True,
+            "last_success_ts": datetime.now(UTC) - timedelta(seconds=120),
+            "last_error": None,
+        }
+    )
+    try:
+        resp = client.get("/api/source")
+    finally:
+        app_state["source"].clear()
+        app_state["source"].update(original_source)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["connected"] is False
+    assert "stale" in body["last_error"]
+
+
+def test_observe_workload_list_prefers_visible_kubernetes_targets(
+    client: TestClient, store: Store
+) -> None:
+    seed_observations(store, "sample-workload", 1)
+    seed_observations(store, "scalescope-demo:sample-workload", 1)
+    original_source = dict(app_state["source"])
+    app_state["source"].update(
+        {
+            "mode": "observe",
+            "targets": [
+                {
+                    "id": "scalescope-demo:sample-workload",
+                    "namespace": "scalescope-demo",
+                    "deployment": "sample-workload",
+                    "metrics_url_configured": True,
+                }
+            ],
+        }
+    )
+    try:
+        resp = client.get("/api/workloads")
+    finally:
+        app_state["source"].clear()
+        app_state["source"].update(original_source)
+
+    assert resp.status_code == 200
+    assert resp.json() == ["scalescope-demo:sample-workload"]
 
 
 # --- unknown workload -> 404 -------------------------------------------------
@@ -109,6 +164,18 @@ def test_unknown_model_returns_400(
     )
     assert resp.status_code == 400
     assert "unknown model" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("path_suffix", ["forecast", "recommendation"])
+def test_default_model_is_ewma(
+    client: TestClient, store: Store, path_suffix: str
+) -> None:
+    workload = _workload_name()
+    seed_observations(store, workload, 40)
+
+    resp = client.get(f"/api/workloads/{workload}/{path_suffix}")
+    assert resp.status_code == 200
+    assert resp.json()["model"] == "ewma"
 
 
 # --- limit validation ---------------------------------------------------------
@@ -187,7 +254,7 @@ def test_concurrent_reads_and_writes_do_not_500(
         resp = client.get(
             f"/api/workloads/{workload}/observations", params={"limit": 50}
         )
-        return resp.status_code
+        return int(resp.status_code)
 
     with ThreadPoolExecutor(max_workers=4) as writer_pool:
         write_future = writer_pool.submit(writer)
@@ -226,15 +293,16 @@ def test_recommendation_does_not_write_to_database(
 def _table_names(store: Store) -> set[str]:
     with store._lock:
         rows = store._conn.execute("SHOW TABLES").fetchall()
-    return {r[0] for r in rows}
+    return {str(row[0]) for row in rows}
 
 
 def _row_count(store: Store, workload: str) -> int:
     with store._lock:
-        (count,) = store._conn.execute(
+        row = store._conn.execute(
             "SELECT COUNT(*) FROM observations WHERE workload = ?", [workload]
         ).fetchone()
-    return count
+    assert row is not None
+    return int(row[0])
 
 
 # --- GET /recommendations (plural) --------------------------------------------
@@ -263,3 +331,30 @@ def test_all_recommendations_returns_six_consistent_models(
         assert m["diagnosis"] == body["diagnosis"]
         assert m["scaling_will_help"] == body["scaling_will_help"]
         assert m["explanation"] == body["explanation"]
+
+
+def test_recommendation_projection_matches_diagnosis_gated_replicas(
+    client: TestClient, store: Store
+) -> None:
+    workload = _workload_name()
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    for i in range(40):
+        store.insert_observation(
+            _observation(
+                start + timedelta(seconds=i),
+                workload,
+                replicas=3,
+                request_rate=1800.0,
+                cpu_throttled_pct=12.0,
+            )
+        )
+
+    resp = client.get(f"/api/workloads/{workload}/recommendation?model=naive")
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert body["scaling_will_help"] is False
+    assert body["recommended_replicas"] == body["current_replicas"] == 3
+    assert body["projected_utilization"] == pytest.approx(
+        body["peak_forecast_p90"] / (3 * CAPACITY_PER_POD_RPS)
+    )

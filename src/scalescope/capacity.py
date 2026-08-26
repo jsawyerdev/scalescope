@@ -16,6 +16,7 @@ MIN_REPLICAS = 3
 MAX_REPLICAS = 30
 MAX_SCALE_UP_PER_STEP = 4
 MAX_SCALE_DOWN_PER_STEP = 2
+MIN_CONFIDENCE_TO_SCALE = 0.10
 STARTUP_LEAD_STEPS = 15  # models pod-startup + readiness lag in simulation ticks
 
 
@@ -55,14 +56,17 @@ def recommend_replicas(
     step = max(-MAX_SCALE_DOWN_PER_STEP, min(MAX_SCALE_UP_PER_STEP, step))
     recommended = current_replicas + step
 
-    projected_utilization = (
-        peak_demand / (recommended * CAPACITY_PER_POD_RPS) if recommended else 0.0
-    )
-
     band_width = (
         float((forecast.p90 - forecast.p10).mean()) if len(forecast.p90) else 0.0
     )
     confidence = max(0.0, min(1.0, 1 - (band_width / max(peak_demand, 1.0))))
+
+    if confidence < MIN_CONFIDENCE_TO_SCALE:
+        recommended = current_replicas
+
+    projected_utilization = (
+        peak_demand / (recommended * CAPACITY_PER_POD_RPS) if recommended else 0.0
+    )
 
     return CapacityRecommendation(
         current_replicas=current_replicas,
