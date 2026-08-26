@@ -12,7 +12,7 @@ No cluster required.
 curl -fs http://localhost:8000/healthz
 curl -fs http://localhost:8000/api/source
 curl -fs http://localhost:8000/api/workloads
-curl -fs "http://localhost:8000/api/workloads/payments-api/recommendations"
+curl -fs "http://localhost:8000/api/workloads/sample-app/recommendations"
 ```
 
 Open http://localhost:8000. The dashboard should show `DEMO`, `no cluster`,

@@ -21,7 +21,7 @@ Run against a DuckDB file that already contains observations for the workload:
 ```bash
 python scripts/tune/tune_lightgbm.py \
   --db-path /path/to/scalescope.duckdb \
-  --workload payments-api \
+  --workload sample-app \
   --trials 40 \
   --horizon 30 \
   --out /tmp/scalescope-lightgbm.json
@@ -62,13 +62,13 @@ From the repo root:
 
 ```bash
 ./scripts/tune/tune_periodic.sh
-./scripts/tune/tune_periodic.sh --workload payments-api --service scalescope --trials 30
+./scripts/tune/tune_periodic.sh --workload sample-app --service scalescope --trials 30
 ./scripts/tune/tune_periodic.sh --workload sample-workload --service scalescope-observe --trials 40
 ```
 
 Arguments:
 
-- `--workload NAME`: workload to tune; defaults to `payments-api`, matching the
+- `--workload NAME`: workload to tune; defaults to `sample-app`, matching the
   one-shot tuner's default.
 - `--service NAME`: running docker-compose service to copy data from; defaults
   to `scalescope`. Use `scalescope-observe` for an OBSERVE-profile instance.
@@ -112,5 +112,5 @@ To opt the compose services into a promoted config, set the container-visible
 path in `.env`:
 
 ```bash
-SCALESCOPE_LIGHTGBM_CONFIG_PATH=/tune-output/payments-api.json
+SCALESCOPE_LIGHTGBM_CONFIG_PATH=/tune-output/sample-app.json
 ```

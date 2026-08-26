@@ -25,6 +25,41 @@ ScaleScope is a working lab with two supported runtime modes:
   derivable from the Kubernetes API alone); without that they report as
   `0.0` rather than a fabricated value.
 
+## Screenshots
+
+All three captured from a real running DEMO instance (`docker compose up --build`,
+no cluster involved) against the built-in `sample-app` synthetic workload.
+
+### The dashboard
+
+![ScaleScope dashboard: diagnosis, cluster/source panel, latest observation,
+predictive ramp, and side-by-side model comparison](docs/screenshots/hero-dashboard.png)
+
+Diagnosis and data freshness up top, then cluster/source identity, the latest
+raw observation, the predictive ramp table for the selected model, and all six
+forecast models recommending replicas from the same evidence so no single
+model's output is taken on faith.
+
+### Diagnosis catching a real problem
+
+![Diagnosis engine showing POSSIBLE_MEMORY_LEAK after clicking the Leak Memory
+load-test button, with the sidebar's active-trigger countdown](docs/screenshots/diagnosis-memory-leak.png)
+
+Clicking "Leak Memory" in the sidebar forces the DEMO simulator's memory-leak
+fault; within a few ticks `diagnosis.py`'s rule engine (never a model) flags
+`POSSIBLE_MEMORY_LEAK` and sets `scaling_will_help=false` — memory is growing
+while traffic is flat, so adding replicas would mask the leak, not fix it.
+
+### Replay lab
+
+![Replay lab table: every forecast model backtested against this workload's
+own recorded history, sorted best-first by mean absolute error](docs/screenshots/replay-lab.png)
+
+`GET /api/workloads/{name}/replay`, triggered by the dashboard's "Run Replay"
+button, backtests every registered model against this workload's own recorded
+history — MAE/MAPE per model, sorted best-first — measured accuracy, not a
+stated preference for which model to trust.
+
 ## Advisory or autoscaling?
 
 Both are supported, but the release default is advisory.
@@ -225,7 +260,7 @@ an OBSERVE instance reading a real cluster (~10s).
 docker compose up --build
 ```
 
-Then open http://localhost:8000. A synthetic workload (`payments-api`) starts
+Then open http://localhost:8000. A synthetic workload (`sample-app`) starts
 generating observations immediately; the dashboard begins populating within a
 few seconds. Data persists in the `scalescope-data` volume across restarts.
 The dashboard ships its own DejaVu Sans Mono Regular font and uses that same
@@ -272,7 +307,7 @@ For DEMO mode, these checks should all return HTTP 200 after either
 curl -fs http://localhost:8000/healthz
 curl -fs http://localhost:8000/api/source
 curl -fs http://localhost:8000/api/workloads
-curl -fs "http://localhost:8000/api/workloads/payments-api/recommendations"
+curl -fs "http://localhost:8000/api/workloads/sample-app/recommendations"
 ```
 
 If Basic Auth is enabled, add
@@ -466,7 +501,7 @@ Exact sequence, once per tick, straight from `main.py`'s `_observe_loop` /
 
 ```mermaid
 sequenceDiagram
-    participant Loop as _observe_loop (every tick)
+    participant ObserveLoop as _observe_loop (every tick)
     participant K8s as Kubernetes API
     participant Store as DuckDB
     participant Diag as diagnose()
@@ -474,31 +509,31 @@ sequenceDiagram
     participant Cap as recommend_replicas()
     participant Act as k8s_actuator.scale()
 
-    Loop->>K8s: collect() — read replicas/CPU/memory
-    Loop->>Store: insert_observation(row)
-    Note over Loop: only if SCALESCOPE_ACTUATE=true
-    Loop->>Store: recent_observations(last 600 rows)
-    Loop->>Diag: diagnose(last 30 rows)
+    ObserveLoop->>K8s: collect() — read replicas/CPU/memory
+    ObserveLoop->>Store: insert_observation(row)
+    Note over ObserveLoop: only if SCALESCOPE_ACTUATE=true
+    ObserveLoop->>Store: recent_observations(last 600 rows)
+    ObserveLoop->>Diag: diagnose(last 30 rows)
     alt scaling_will_help == false
-        Diag-->>Loop: source.last_actuation_error = "skipped: <explanation>"
+        Diag-->>ObserveLoop: source.last_actuation_error = "skipped: <explanation>"
     else scaling_will_help == true
-        Loop->>Model: predict(request_rate, horizon=30)
-        Model-->>Loop: Forecast(p10, p50, p90)
-        Loop->>Cap: recommend_replicas(current, forecast, peak_step=15)
-        Cap-->>Loop: recommended_replicas
+        ObserveLoop->>Model: predict(request_rate, horizon=30)
+        Model-->>ObserveLoop: Forecast(p10, p50, p90)
+        ObserveLoop->>Cap: recommend_replicas(current, forecast, peak_step=15)
+        Cap-->>ObserveLoop: recommended_replicas
         alt recommended == current
-            Note over Loop: no-op, nothing written
+            Note over ObserveLoop: no-op, nothing written
         else recommended != current
-            Loop->>Act: scale(deployment, recommended)
+            ObserveLoop->>Act: scale(deployment, recommended)
             Act->>K8s: list HorizontalPodAutoscalers in namespace
             alt a competing HPA targets this Deployment
-                Act-->>Loop: raise HpaConflictError
-                Loop->>Loop: source.last_actuation_error = "...refusing to write"
+                Act-->>ObserveLoop: raise HpaConflictError
+                ObserveLoop->>ObserveLoop: source.last_actuation_error = "...refusing to write"
             else no competing HPA
                 Act->>K8s: patch deployments/scale — spec.replicas = recommended
                 K8s-->>Act: 200 OK
-                Act-->>Loop: success
-                Loop->>Loop: source.last_actuation_ts / last_actuation_replicas updated
+                Act-->>ObserveLoop: success
+                ObserveLoop->>ObserveLoop: source.last_actuation_ts / last_actuation_replicas updated
             end
         end
     end

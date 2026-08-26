@@ -141,12 +141,12 @@ for _ in $(seq 1 30); do
     sleep 1
 done
 for _ in $(seq 1 30); do
-    if curl_auth -sf "$DEMO_URL/api/workloads" | json_list_contains payments-api; then
+    if curl_auth -sf "$DEMO_URL/api/workloads" | json_list_contains sample-app; then
         break
     fi
     sleep 1
 done
-curl_auth -sf "$DEMO_URL/api/workloads" | json_list_contains payments-api
+curl_auth -sf "$DEMO_URL/api/workloads" | json_list_contains sample-app
 
 if [ "$WITH_OBSERVE" -eq 1 ]; then
     for _ in $(seq 1 30); do

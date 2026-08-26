@@ -27,7 +27,7 @@ from scalescope.storage import Store
 
 _MAX_REPLAY_OBSERVATIONS = 5000
 _REPLAY_MIN_HISTORY = 8
-_DEFAULT_WORKLOAD = "payments-api"
+_DEFAULT_WORKLOAD = "sample-app"
 _ConfigValue = int | float | str
 
 

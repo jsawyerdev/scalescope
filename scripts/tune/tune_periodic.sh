@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-WORKLOAD="payments-api"
+WORKLOAD="sample-app"
 SERVICE="scalescope"
 TRIALS=30
 CONTAINER_DB_PATH="/data/scalescope.duckdb"

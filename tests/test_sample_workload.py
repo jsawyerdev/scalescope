@@ -162,7 +162,7 @@ def test_scalescope_demo_rejects_observe_only_stress(
     monkeypatch.setattr(routes, "settings", replace(routes.settings, mode="demo"))
 
     with pytest.raises(HTTPException) as exc_info:
-        routes.trigger_fault("payments-api", kind="stress", duration_seconds=5)
+        routes.trigger_fault("sample-app", kind="stress", duration_seconds=5)
 
     assert exc_info.value.status_code == 501
     assert exc_info.value.detail == "stress trigger is only supported in OBSERVE mode"

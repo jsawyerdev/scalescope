@@ -27,7 +27,7 @@ BASE_LATENCY_MS = 25.0
 class WorkloadState:
     """Mutable simulation state for one workload."""
 
-    name: str = "payments-api"
+    name: str = "sample-app"
     replicas: int = 8
     memory_leak_mb_per_tick: float = 0.0
     memory_baseline_mb: float = 180.0
