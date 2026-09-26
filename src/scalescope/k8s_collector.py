@@ -224,6 +224,32 @@ def _selector_matches(selector: object, labels: dict[str, str]) -> bool:
 
 
 @dataclass(frozen=True)
+class PrometheusQueries:
+    """Instant queries returning one series per pod, labelled `namespace` and `pod`.
+
+    An empty query is skipped. Values: requests/s, CPU-throttled fraction of
+    periods (0-1), p95 latency in ms, and error fraction of requests (0-1).
+    """
+
+    request_rate: str = ""
+    throttled_fraction: str = ""
+    latency_p95_ms: str = ""
+    error_rate: str = ""
+
+
+PodSeries = dict[tuple[str, str], float]
+
+
+def _pod_values(
+    series: PodSeries | None, namespace: str, pods: list[Any]
+) -> list[float]:
+    if not series:
+        return []
+    keys = ((namespace, pod.metadata.name) for pod in pods)
+    return [series[key] for key in keys if key in series]
+
+
+@dataclass(frozen=True)
 class CollectionResult:
     """One tick's rows, plus the targets seen and any per-target failures."""
 
@@ -236,8 +262,8 @@ class KubernetesObservationCollector:
     """Collects observation rows for visible Kubernetes Deployments.
 
     Each tick costs one Deployment list, plus one Pod list and one PodMetrics
-    list per namespace that has Deployments, plus at most one Prometheus
-    query, however many Deployments there are.
+    list per namespace that has Deployments, plus one query per configured
+    Prometheus signal, however many Deployments there are.
     """
 
     def __init__(
@@ -245,7 +271,7 @@ class KubernetesObservationCollector:
         kubeconfig_path: str | None = None,
         metrics_urls: dict[str, str] | None = None,
         prometheus_url: str | None = None,
-        prometheus_rps_query: str | None = None,
+        prometheus_queries: PrometheusQueries | None = None,
     ) -> None:
         self.auth_type = load_k8s_config(kubeconfig_path)
         self.auth_identity = (
@@ -255,7 +281,8 @@ class KubernetesObservationCollector:
         )
         self._metrics_urls = metrics_urls or {}
         self._prometheus_url = prometheus_url.rstrip("/") if prometheus_url else None
-        self._prometheus_rps_query = prometheus_rps_query
+        self._prometheus_queries = prometheus_queries or PrometheusQueries()
+        self._failing_queries: set[str] = set()
         self._apps = client.AppsV1Api()
         self._core = client.CoreV1Api()
         self._custom = client.CustomObjectsApi()
@@ -288,7 +315,7 @@ class KubernetesObservationCollector:
         )
         rows: list[dict[str, Any]] = []
         errors: list[str] = []
-        pod_request_rates = self._prometheus_pod_request_rates()
+        pod_series = self._prometheus_pod_series()
         for namespace, namespace_deployments in sorted(by_namespace.items()):
             try:
                 pods = self._list_pods(namespace)
@@ -299,7 +326,7 @@ class KubernetesObservationCollector:
             for deployment in namespace_deployments:
                 try:
                     rows.append(
-                        self._observe(deployment, pods, usage_by_pod, pod_request_rates)
+                        self._observe(deployment, pods, usage_by_pod, pod_series)
                     )
                 except KubernetesUnavailableError as exc:
                     errors.append(f"{namespace}/{deployment.metadata.name}: {exc}")
@@ -374,7 +401,7 @@ class KubernetesObservationCollector:
         deployment: Any,
         namespace_pods: list[Any],
         usage_by_pod: dict[str, tuple[float, float]],
-        pod_request_rates: dict[tuple[str, str], float] | None,
+        pod_series: dict[str, PodSeries],
     ) -> dict[str, Any]:
         target = KubernetesWorkloadTarget(
             namespace=str(deployment.metadata.namespace),
@@ -407,14 +434,20 @@ class KubernetesObservationCollector:
         scraped = self._scrape_workload_metrics(
             self._metrics_urls.get(target.workload_id)
         )
-        request_rate = scraped.get("request_rate")
-        if request_rate is None and pod_request_rates:
-            rates = [
-                pod_request_rates[(target.namespace, pod.metadata.name)]
-                for pod in pods
-                if (target.namespace, pod.metadata.name) in pod_request_rates
-            ]
-            request_rate = sum(rates) if rates else None
+
+        def per_pod(signal: str) -> list[float]:
+            return _pod_values(pod_series.get(signal), target.namespace, pods)
+
+        # The workload's own /metrics wins; Prometheus fills the rest.
+        # Rates add across pods; fractions average; latency takes the worst.
+        rates, throttled = per_pod("request_rate"), per_pod("throttled_fraction")
+        latencies, errors = per_pod("latency_p95_ms"), per_pod("error_rate")
+        request_rate = scraped.get("request_rate", sum(rates) if rates else None)
+        latency = scraped.get("latency_p95_ms", max(latencies) if latencies else 0.0)
+        error_rate = scraped.get(
+            "error_rate", sum(errors) / len(errors) if errors else 0.0
+        )
+        throttled_pct = 100 * sum(throttled) / len(throttled) if throttled else 0.0
 
         replicas = deployment.status.replicas or 0
         desired = deployment.spec.replicas
@@ -427,10 +460,10 @@ class KubernetesObservationCollector:
             "cpu_usage_pct": round(cpu_usage_pct, 2),
             "cpu_usage_millicores": round(cpu_used, 1),
             "cpu_request_millicores": round(cpu_request_per_pod, 1),
-            "cpu_throttled_pct": 0.0,
+            "cpu_throttled_pct": round(throttled_pct, 2),
             "memory_usage_mb": round(memory_used / (1024 * 1024), 2),
-            "latency_p95_ms": scraped.get("latency_p95_ms", 0.0),
-            "error_rate": scraped.get("error_rate", 0.0),
+            "latency_p95_ms": round(latency, 2),
+            "error_rate": round(error_rate, 4),
             "pending_pods": sum(1 for pod in pods if pod.status.phase == "Pending"),
             "restarts": sum(
                 status.restart_count
@@ -451,28 +484,46 @@ class KubernetesObservationCollector:
         raw = _parse_prometheus_gauges(response.text, set(_SCRAPED_GAUGE_NAMES))
         return {_SCRAPED_GAUGE_NAMES[name]: value for name, value in raw.items()}
 
-    def _prometheus_pod_request_rates(self) -> dict[tuple[str, str], float] | None:
-        """Requests/s per (namespace, pod) from one instant query; None if unavailable."""
-        if self._prometheus_url is None or not self._prometheus_rps_query:
-            return None
+    def _prometheus_pod_series(self) -> dict[str, PodSeries]:
+        """Every configured per-pod signal for this tick, keyed by signal name."""
+        if self._prometheus_url is None:
+            return {}
+        queries = vars(self._prometheus_queries)
+        series: dict[str, PodSeries] = {}
+        for signal, query in queries.items():
+            if not query:
+                continue
+            values = self._prometheus_query(query)
+            if values is None:
+                if signal not in self._failing_queries:
+                    logger.warning(
+                        "prometheus %s query failed or returned series without "
+                        "namespace and pod labels",
+                        signal,
+                    )
+                    self._failing_queries.add(signal)
+                continue
+            if signal in self._failing_queries:
+                logger.info("prometheus %s query recovered", signal)
+                self._failing_queries.discard(signal)
+            series[signal] = values
+        return series
+
+    def _prometheus_query(self, query: str) -> PodSeries | None:
         try:
             response = httpx.get(
                 f"{self._prometheus_url}/api/v1/query",
-                params={"query": self._prometheus_rps_query},
+                params={"query": query},
                 timeout=5.0,
             )
             response.raise_for_status()
-            rates: dict[tuple[str, str], float] = {}
+            values: PodSeries = {}
             for series in response.json()["data"]["result"]:
                 labels = series["metric"]
                 value = float(series["value"][1])
                 if math.isfinite(value):
                     key = (labels["namespace"], labels["pod"])
-                    rates[key] = rates.get(key, 0.0) + value
+                    values[key] = values.get(key, 0.0) + value
         except httpx.HTTPError, KeyError, TypeError, ValueError, IndexError:
-            logger.warning(
-                "prometheus request-rate query failed; its series need namespace "
-                "and pod labels"
-            )
             return None
-        return rates
+        return values

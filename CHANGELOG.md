@@ -4,6 +4,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.14.0]
+
+### Added
+
+- **Performance model** (`scalescope.performance`): each workload's p95
+  latency is fitted as a queueing curve, `p95(x) = B + c / (mu - x)` over
+  load per pod, and pods are sized so the planned load keeps p95 at
+  `SCALESCOPE_LATENCY_SLO_MS` (default: twice the no-load latency). The fit
+  is deterministic (grid over `mu`, exact least squares on relative error),
+  robust to incidents (least trimmed squares), used only when the data
+  identify it, and never plans past the highest load seen meeting the
+  target. Capacity resolution is now configured → latency model → CPU
+  estimate; recommendations report the model (`latency_model`) and the
+  effective `target_utilization`.
+- **Scaling replay**: `GET /api/workloads/{name}/scaling-replay` and a
+  dashboard panel replay a workload's recorded demand through ScaleScope
+  and a reactive HPA (300s scale-down stabilization) with the same capacity
+  and pod start-up delay, and report time short of pods, average pods, and
+  scale changes. Capacity is taken from the first third of the history only.
+- Prometheus now also supplies per-pod CPU throttling (cAdvisor), p95
+  latency, and error rate for every workload
+  (`SCALESCOPE_PROMETHEUS_THROTTLING_QUERY`, `_LATENCY_QUERY`,
+  `_ERROR_RATE_QUERY`; empty skips a signal). Previously throttling was
+  always 0 in OBSERVE mode and latency/errors came only from the primary
+  target's metrics URL.
+
+### Changed
+
+- The simulator's latency follows the M/M/1 queueing shape, so DEMO mode
+  exercises the performance model.
+- README: removed the internal "Concurrency and consistency" section, added
+  "Performance model" and "Scaling replay" with measured results, and
+  rewrote "Known limitations".
+
 ## [0.13.0]
 
 ### Changed

@@ -1,10 +1,11 @@
 """Turns a demand forecast into a required-replica recommendation.
 
-Per-pod capacity is never assumed. For request-rate demand it is configured
-by the operator or estimated from the workload's own history; for CPU
-demand it is each pod's CPU request. Without one, ScaleScope keeps the
-current replica count and says so, rather than sizing a real workload with
-an invented number.
+Per-pod capacity is never assumed. For request-rate demand it is, in order:
+configured by the operator; read from the workload's own latency curve (a
+fitted queueing model, see `performance.py`); or estimated from its CPU
+history. For CPU demand it is each pod's CPU request. Without one,
+ScaleScope keeps the current replica count and says so, rather than sizing
+a real workload with an invented number.
 """
 
 from __future__ import annotations
@@ -18,12 +19,17 @@ import polars as pl
 
 from scalescope.demand import DemandSignal
 from scalescope.models.base import Forecast
+from scalescope.performance import (
+    LatencyModel,
+    fit_latency_model,
+    latency_target_ms,
+)
 
 DEFAULT_MIN_REPLICAS = 1
 DEFAULT_MAX_REPLICAS = 30
 DEFAULT_TARGET_UTILIZATION = 0.70
 # Kubernetes HPA's default scale-down stabilization window.
-DEFAULT_SCALE_DOWN_STABILIZATION_SECONDS = 300.0
+HPA_SCALE_DOWN_STABILIZATION_SECONDS = 300.0
 MAX_SCALE_UP_PER_STEP = 4
 MAX_SCALE_DOWN_PER_STEP = 2
 MIN_CONFIDENCE_TO_SCALE = 0.10
@@ -36,7 +42,9 @@ _ESTIMATE_MIN_CPU_PCT = 5.0
 _ESTIMATE_MAX_CPU_PCT = 95.0
 _MIN_ESTIMATE_SAMPLES = 10
 
-CapacitySource = Literal["configured", "estimated", "cpu_request", "unavailable"]
+CapacitySource = Literal[
+    "configured", "latency_model", "estimated", "cpu_request", "unavailable"
+]
 # Why a recommendation keeps the current count even if demand says otherwise.
 HoldReason = Literal["diagnosis", "capacity_unknown", "low_confidence"]
 
@@ -54,11 +62,17 @@ class ScalingPolicy:
 class PodCapacity:
     """Demand one pod serves at 100% of its CPU request, and where it came from.
 
-    In the demand signal's unit: requests/s, or CPU millicores.
+    In the demand signal's unit: requests/s, or CPU millicores. A latency
+    model also sets how full a pod may run (`target_utilization`, the load
+    that keeps p95 at `latency_target_ms` as a fraction of saturation);
+    otherwise the policy's target applies.
     """
 
     per_pod: float | None
     source: CapacitySource
+    target_utilization: float | None = None
+    latency_model: LatencyModel | None = None
+    latency_target_ms: float | None = None
 
 
 @dataclass(frozen=True)
@@ -101,13 +115,48 @@ def estimate_capacity_per_pod(observations: pl.DataFrame) -> float | None:
     return float(estimate) if estimate is not None and estimate > 0 else None
 
 
+def latency_capacity(
+    observations: pl.DataFrame, latency_slo_ms: float | None
+) -> PodCapacity | None:
+    """Capacity from the workload's fitted latency curve, if it is identifiable."""
+    running = observations.filter(pl.col("replicas") > 0)
+    if running.is_empty():
+        return None
+    load_per_pod = (running["request_rate"] / running["replicas"]).to_numpy()
+    latency = running["latency_p95_ms"].to_numpy()
+    model = fit_latency_model(load_per_pod, latency)
+    if model is None:
+        return None
+    target = latency_target_ms(model, latency_slo_ms)
+    load = model.load_for_latency(target)
+    # Never plan beyond the highest load per pod seen meeting the target:
+    # the curve is fitted, but past the data it is extrapolated.
+    seen_meeting_target = load_per_pod[latency <= target]
+    if load is None or seen_meeting_target.size == 0:
+        return None
+    load = min(load, float(seen_meeting_target.max()))
+    if load <= 0:
+        return None
+    return PodCapacity(
+        per_pod=model.saturation_rps,
+        source="latency_model",
+        target_utilization=load / model.saturation_rps,
+        latency_model=model,
+        latency_target_ms=target,
+    )
+
+
 def resolve_capacity(
-    observations: pl.DataFrame, signal: DemandSignal, configured_rps: float | None
+    observations: pl.DataFrame,
+    signal: DemandSignal,
+    configured_rps: float | None,
+    latency_slo_ms: float | None = None,
 ) -> PodCapacity:
     """Per-pod capacity in the unit of `signal`.
 
     CPU demand: the latest per-pod CPU request. Request-rate demand: the
-    operator's configured value if set, else an estimate from history.
+    operator's configured value if set, else the latency model, else an
+    estimate from CPU history.
     """
     if signal == "cpu_millicores":
         requests = observations["cpu_request_millicores"].drop_nulls()
@@ -117,6 +166,9 @@ def resolve_capacity(
         return PodCapacity(None, "unavailable")
     if configured_rps is not None:
         return PodCapacity(configured_rps, "configured")
+    from_latency = latency_capacity(observations, latency_slo_ms)
+    if from_latency is not None:
+        return from_latency
     estimate = estimate_capacity_per_pod(observations)
     if estimate is None:
         return PodCapacity(None, "unavailable")
@@ -163,7 +215,8 @@ def recommend_replicas(
     recommended = current_replicas
     pods_needed: list[int] | None = None
     if capacity.per_pod is not None:
-        safe_capacity_per_pod = capacity.per_pod * policy.target_utilization
+        utilization = capacity.target_utilization or policy.target_utilization
+        safe_capacity_per_pod = capacity.per_pod * utilization
 
         def pods_for(demand: float) -> int:
             required = math.ceil(demand / safe_capacity_per_pod)

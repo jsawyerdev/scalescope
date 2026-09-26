@@ -439,3 +439,41 @@ def test_recommendation_explains_itself_for_the_dashboard(
     assert rec["target_utilization"] == pytest.approx(0.7)
     assert len(rec["pods_needed"]) == 30
     assert all(isinstance(n, int) and n >= 1 for n in rec["pods_needed"])
+
+
+def test_scaling_replay_compares_scalescope_with_a_reactive_hpa(
+    client: TestClient, store: Store
+) -> None:
+    workload = _workload_name()
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    for i in range(300):
+        store.insert_observation(
+            _observation(
+                start + timedelta(seconds=2 * i),
+                workload,
+                replicas=4,
+                request_rate=0.0,
+                cpu_usage_millicores=2000.0 + 1500.0 * (i // 100),
+                cpu_request_millicores=500.0,
+            )
+        )
+
+    body = client.get(f"/api/workloads/{workload}/scaling-replay").json()
+
+    assert body["capacity_source"] == "cpu_request"
+    assert [o["name"] for o in body["outcomes"]] == ["ScaleScope", "Reactive HPA"]
+    for outcome in body["outcomes"]:
+        assert 0 <= outcome["under_provisioned_pct"] <= 100
+        assert outcome["average_pods"] >= 1
+
+
+def test_scaling_replay_explains_when_it_cannot_run(
+    client: TestClient, store: Store
+) -> None:
+    workload = _workload_name()
+    seed_observations(store, workload, 20)
+
+    body = client.get(f"/api/workloads/{workload}/scaling-replay").json()
+
+    assert body["outcomes"] == []
+    assert body["reason"]

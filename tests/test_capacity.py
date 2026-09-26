@@ -30,7 +30,27 @@ def _history(rows: int, rps_per_pod_at_full_cpu: float) -> pl.DataFrame:
         for i, rate in enumerate(request_rate)
     ]
     return pl.DataFrame(
-        {"replicas": replicas, "request_rate": request_rate, "cpu_usage_pct": cpu}
+        {
+            "replicas": replicas,
+            "request_rate": request_rate,
+            "cpu_usage_pct": cpu,
+            "latency_p95_ms": [30.0] * rows,  # flat: the latency model declines
+        }
+    )
+
+
+def _queueing_history(rows: int, mu: float, base_ms: float, c: float) -> pl.DataFrame:
+    rng = np.random.default_rng(3)
+    replicas = rng.integers(2, 8, rows)
+    per_pod = rng.uniform(0.2 * mu, 0.93 * mu, rows)
+    latency = (base_ms + c / (mu - per_pod)) * (1 + rng.normal(0, 0.05, rows))
+    return pl.DataFrame(
+        {
+            "replicas": replicas,
+            "request_rate": per_pod * replicas,
+            "cpu_usage_pct": [0.0] * rows,
+            "latency_p95_ms": latency,
+        }
     )
 
 
@@ -187,3 +207,54 @@ def test_pods_needed_follows_the_p90_forecast() -> None:
     assert rec.pods_needed == [2, 5]
     unknown = recommend_replicas(3, forecast, PodCapacity(None, "unavailable"), _POLICY)
     assert unknown.pods_needed is None
+
+
+def test_latency_model_sizes_pods_for_the_latency_target() -> None:
+    capacity = resolve_capacity(
+        _queueing_history(200, mu=220.0, base_ms=20.0, c=3000.0), "request_rate", None
+    )
+
+    assert capacity.source == "latency_model"
+    assert capacity.per_pod is not None and capacity.target_utilization is not None
+    assert capacity.per_pod == pytest.approx(220.0, rel=0.05)
+    # Default target: twice the no-load latency, 2 * (20 + 3000/220) = 67.3 ms,
+    # reached at 220 - 3000 / (67.3 - 20) = 156.5 req/s per pod.
+    assert capacity.per_pod * capacity.target_utilization == pytest.approx(
+        156.5, rel=0.05
+    )
+
+
+def test_latency_slo_overrides_the_default_target() -> None:
+    history = _queueing_history(200, mu=220.0, base_ms=20.0, c=3000.0)
+    capacity = resolve_capacity(history, "request_rate", None, latency_slo_ms=120.0)
+
+    assert capacity.latency_target_ms == 120.0
+    assert capacity.per_pod is not None and capacity.target_utilization is not None
+    # 220 - 3000 / (120 - 20) = 190 req/s per pod.
+    assert capacity.per_pod * capacity.target_utilization == pytest.approx(
+        190.0, rel=0.05
+    )
+
+
+def test_latency_capacity_does_not_extrapolate_past_observed_load() -> None:
+    history = _queueing_history(200, mu=220.0, base_ms=20.0, c=3000.0)
+    # Keep only loads up to 120 req/s per pod; the curve says 156.5 is safe,
+    # but nothing above 120 was ever seen.
+    observed = history.filter(pl.col("request_rate") / pl.col("replicas") <= 120.0)
+    capacity = resolve_capacity(observed, "request_rate", None)
+
+    assert capacity.source == "latency_model"
+    assert capacity.per_pod is not None and capacity.target_utilization is not None
+    assert capacity.per_pod * capacity.target_utilization <= 120.0
+
+
+def test_configured_capacity_wins_over_the_latency_model() -> None:
+    history = _queueing_history(200, mu=220.0, base_ms=20.0, c=3000.0)
+    assert resolve_capacity(history, "request_rate", 100.0).source == "configured"
+
+
+def test_recommendation_uses_the_latency_model_utilization() -> None:
+    latency_sized = PodCapacity(220.0, "latency_model", target_utilization=0.5)
+    # 1100 req/s at 110 req/s per pod (220 * 0.5) -> 10 pods.
+    rec = recommend_replicas(8, _forecast([1100.0 / 1.2] * 10), latency_sized, _POLICY)
+    assert rec.pods_needed == [10] * 10

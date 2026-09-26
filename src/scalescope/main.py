@@ -30,6 +30,7 @@ from scalescope.k8s_collector import (
     KubernetesObservationCollector,
     KubernetesUnavailableError,
     KubernetesWorkloadTarget,
+    PrometheusQueries,
     workload_id,
 )
 from scalescope.logging_config import configure_logging
@@ -137,7 +138,9 @@ def _actuate(
         return
 
     signal = demand_signal(df)
-    capacity = resolve_capacity(df, signal, settings.capacity_per_pod_rps)
+    capacity = resolve_capacity(
+        df, signal, settings.capacity_per_pod_rps, settings.latency_slo_ms
+    )
     if capacity.per_pod is None:
         source["last_actuation_error"] = (
             "skipped: per-pod capacity unknown; set SCALESCOPE_CAPACITY_PER_POD_RPS, "
@@ -189,7 +192,12 @@ async def _observe_loop(store: Store) -> None:
             kubeconfig_path=settings.k8s_kubeconfig,
             metrics_urls=metrics_urls,
             prometheus_url=settings.prometheus_url,
-            prometheus_rps_query=settings.prometheus_rps_query,
+            prometheus_queries=PrometheusQueries(
+                request_rate=settings.prometheus_rps_query,
+                throttled_fraction=settings.prometheus_throttling_query,
+                latency_p95_ms=settings.prometheus_latency_query,
+                error_rate=settings.prometheus_error_rate_query,
+            ),
         )
         source["cluster_server"] = collector.cluster_server
         source["cluster_auth_type"] = collector.auth_type
