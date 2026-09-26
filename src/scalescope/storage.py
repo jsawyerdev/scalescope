@@ -22,6 +22,9 @@ _OBSERVATION_COLUMNS = (
     "error_rate",
     "pending_pods",
     "restarts",
+    "desired_replicas",
+    "cpu_usage_millicores",
+    "cpu_request_millicores",
 )
 
 _SCHEMA = """
@@ -40,12 +43,24 @@ CREATE TABLE IF NOT EXISTS observations (
 );
 """
 
+# Columns added after the first release: existing databases gain them on
+# startup, with values that keep old rows meaningful.
+_MIGRATIONS = """
+ALTER TABLE observations ADD COLUMN IF NOT EXISTS desired_replicas INTEGER;
+UPDATE observations SET desired_replicas = replicas WHERE desired_replicas IS NULL;
+ALTER TABLE observations ADD COLUMN IF NOT EXISTS
+    cpu_usage_millicores DOUBLE DEFAULT 0;
+ALTER TABLE observations ADD COLUMN IF NOT EXISTS
+    cpu_request_millicores DOUBLE DEFAULT 0;
+"""
+
 # Column order must match _OBSERVATION_COLUMNS, which supplies the values.
 _INSERT = """
 INSERT INTO observations
 (ts, workload, replicas, request_rate, cpu_usage_pct, cpu_throttled_pct,
- memory_usage_mb, latency_p95_ms, error_rate, pending_pods, restarts)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ memory_usage_mb, latency_p95_ms, error_rate, pending_pods, restarts,
+ desired_replicas, cpu_usage_millicores, cpu_request_millicores)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -75,6 +90,7 @@ class Store:
         self._lock = threading.Lock()
         self._conn = duckdb.connect(db_path)
         self._conn.execute(_SCHEMA)
+        self._conn.execute(_MIGRATIONS)
 
     def insert_observation(self, row: dict[str, Any]) -> None:
         """Insert one observation; `row["ts"]` is stored as UTC."""
@@ -102,6 +118,14 @@ class Store:
             # result; rebuild it so callers can still index known columns.
             return pl.DataFrame(schema={c: pl.Null for c in _OBSERVATION_COLUMNS})
         return result.sort("ts")
+
+    def prune(self, older_than: datetime) -> int:
+        """Delete observations older than `older_than`; returns rows deleted."""
+        with self._lock:
+            deleted = self._conn.execute(
+                "DELETE FROM observations WHERE ts < ?", [_naive_utc(older_than)]
+            ).fetchone()
+        return int(deleted[0]) if deleted else 0
 
     def workloads(self) -> list[str]:
         with self._lock:

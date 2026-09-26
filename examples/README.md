@@ -60,7 +60,7 @@ Build an image your cluster can pull, update
 
 ```sh
 docker buildx build --platform linux/amd64 \
-  -t <your-registry>/scalescope:0.11.1 \
+  -t <your-registry>/scalescope:0.12.0 \
   --push .
 
 kubectl apply -f k8s/scalescope/

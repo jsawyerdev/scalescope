@@ -11,7 +11,7 @@ from enum import Enum
 
 import polars as pl
 
-from scalescope.capacity import MAX_REPLICAS
+from scalescope.capacity import DEFAULT_MAX_REPLICAS
 
 
 class Diagnosis(Enum):
@@ -43,7 +43,7 @@ PENDING_PODS_THRESHOLD = 1
 
 
 def diagnose(
-    observations: pl.DataFrame, max_replicas: int = MAX_REPLICAS
+    observations: pl.DataFrame, max_replicas: int = DEFAULT_MAX_REPLICAS
 ) -> DiagnosisResult:
     """Classify the current health state of a workload from recent observations.
 

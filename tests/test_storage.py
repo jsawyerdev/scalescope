@@ -30,6 +30,9 @@ def test_timestamps_round_trip_as_utc_on_non_utc_host(tmp_path: Path) -> None:
                 "error_rate": 0.0,
                 "pending_pods": 0,
                 "restarts": 0,
+                "desired_replicas": 1,
+                "cpu_usage_millicores": 0.0,
+                "cpu_request_millicores": 0.0,
             }}
         )
         print(store.recent_observations("w", 1)["ts"][0].isoformat())

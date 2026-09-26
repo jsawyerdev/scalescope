@@ -17,7 +17,6 @@ from typing import cast
 import pytest
 from fastapi.testclient import TestClient
 
-from scalescope.capacity import CAPACITY_PER_POD_RPS
 from scalescope.main import app, app_state
 from scalescope.storage import Store
 
@@ -61,8 +60,11 @@ def _observation(ts: datetime, workload: str, **overrides: object) -> dict[str, 
         "error_rate": 0.0,
         "pending_pods": 0,
         "restarts": 0,
+        "cpu_usage_millicores": 4000.0,
+        "cpu_request_millicores": 1000.0,
     }
     base.update(overrides)
+    base.setdefault("desired_replicas", base["replicas"])
     return base
 
 
@@ -79,23 +81,28 @@ def seed_observations(store: Store, workload: str, n: int) -> None:
         )
 
 
+def _isolated_source(monkeypatch: pytest.MonkeyPatch, **fields: object) -> None:
+    """Swap in a private copy of app_state["source"] for this test.
+
+    The app's background observe loop keeps a reference to the original dict
+    and writes to it concurrently (e.g. its kubeconfig error), so mutating
+    that dict in place races with it.
+    """
+    monkeypatch.setitem(app_state, "source", {**app_state["source"], **fields})
+
+
 def test_source_reports_stale_observe_collection_as_disconnected(
-    client: TestClient,
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    original_source = dict(app_state["source"])
-    app_state["source"].update(
-        {
-            "mode": "observe",
-            "connected": True,
-            "last_success_ts": datetime.now(UTC) - timedelta(seconds=120),
-            "last_error": None,
-        }
+    _isolated_source(
+        monkeypatch,
+        mode="observe",
+        connected=True,
+        last_success_ts=datetime.now(UTC) - timedelta(seconds=120),
+        last_error=None,
     )
-    try:
-        resp = client.get("/api/source")
-    finally:
-        app_state["source"].clear()
-        app_state["source"].update(original_source)
+
+    resp = client.get("/api/source")
 
     assert resp.status_code == 200
     body = resp.json()
@@ -104,29 +111,24 @@ def test_source_reports_stale_observe_collection_as_disconnected(
 
 
 def test_observe_workload_list_prefers_visible_kubernetes_targets(
-    client: TestClient, store: Store
+    client: TestClient, store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seed_observations(store, "sample-workload", 1)
     seed_observations(store, "scalescope-demo:sample-workload", 1)
-    original_source = dict(app_state["source"])
-    app_state["source"].update(
-        {
-            "mode": "observe",
-            "targets": [
-                {
-                    "id": "scalescope-demo:sample-workload",
-                    "namespace": "scalescope-demo",
-                    "deployment": "sample-workload",
-                    "metrics_url_configured": True,
-                }
-            ],
-        }
+    _isolated_source(
+        monkeypatch,
+        mode="observe",
+        targets=[
+            {
+                "id": "scalescope-demo:sample-workload",
+                "namespace": "scalescope-demo",
+                "deployment": "sample-workload",
+                "metrics_url_configured": True,
+            }
+        ],
     )
-    try:
-        resp = client.get("/api/workloads")
-    finally:
-        app_state["source"].clear()
-        app_state["source"].update(original_source)
+
+    resp = client.get("/api/workloads")
 
     assert resp.status_code == 200
     assert resp.json() == ["scalescope-demo:sample-workload"]
@@ -343,6 +345,79 @@ def test_recommendation_projection_matches_diagnosis_gated_replicas(
 
     assert body["scaling_will_help"] is False
     assert body["recommended_replicas"] == body["current_replicas"] == 3
+    # 1800 req/s over 3 pods at 50% CPU -> 1200 req/s per pod at 100%.
+    assert body["capacity_source"] == "estimated"
+    assert body["capacity_per_pod"] == pytest.approx(1200.0)
     assert body["projected_utilization"] == pytest.approx(
-        body["peak_forecast_p90"] / (3 * CAPACITY_PER_POD_RPS)
+        body["peak_forecast_p90"] / (3 * 1200.0)
     )
+
+
+def test_recommendation_without_capacity_signal_keeps_replicas(
+    client: TestClient, store: Store
+) -> None:
+    workload = _workload_name()
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    for i in range(40):
+        store.insert_observation(
+            _observation(
+                start + timedelta(seconds=i),
+                workload,
+                replicas=4,
+                request_rate=5000.0,
+                cpu_usage_pct=0.0,
+            )
+        )
+
+    resp = client.get(f"/api/workloads/{workload}/recommendation?model=naive")
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert body["demand_signal"] == "request_rate"
+    assert body["capacity_source"] == "unavailable"
+    assert body["capacity_per_pod"] is None
+    assert body["recommended_replicas"] == body["current_replicas"] == 4
+    assert body["projected_utilization"] is None
+
+
+def test_workload_without_request_metrics_is_forecast_on_total_cpu(
+    client: TestClient, store: Store
+) -> None:
+    workload = _workload_name()
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    for i in range(40):
+        store.insert_observation(
+            _observation(
+                start + timedelta(seconds=i),
+                workload,
+                replicas=2,
+                request_rate=0.0,
+                cpu_usage_millicores=3500.0,
+                cpu_request_millicores=500.0,
+            )
+        )
+
+    forecast = client.get(f"/api/workloads/{workload}/forecast").json()
+    rec = client.get(f"/api/workloads/{workload}/recommendation?model=naive").json()
+
+    assert forecast["demand_signal"] == "cpu_millicores"
+    assert forecast["p50"][0] == pytest.approx(3500.0)
+    assert rec["demand_signal"] == "cpu_millicores"
+    assert rec["capacity_source"] == "cpu_request"
+    assert rec["capacity_per_pod"] == 500.0
+    # 3500m at 70% of 500m per pod needs 10 pods; one step is at most +4.
+    assert rec["recommended_replicas"] == 6
+
+
+def test_forecast_cache_is_bounded(
+    client: TestClient, store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scalescope.api import routes
+
+    monkeypatch.setattr(routes, "_FORECAST_CACHE_MAX_ENTRIES", 2)
+    for _ in range(4):
+        workload = _workload_name()
+        seed_observations(store, workload, 5)
+        assert client.get(f"/api/workloads/{workload}/forecast").status_code == 200
+
+    assert len(routes._forecast_cache) <= 2

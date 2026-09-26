@@ -22,13 +22,9 @@ spec:
           type: RuntimeDefault
       containers:
         - name: sample-workload
-          # Demo image for the live homelab cluster. Replace this with a
-          # registry your own cluster can pull from before applying.
-          # imagePullPolicy is Always because :latest is mutable: with
-          # IfNotPresent, a node that already cached an older :latest silently
-          # keeps running it after a rebuild, push, and rollout restart.
-          image: 192.168.1.202:5000/scalescope-sample-workload:latest
-          imagePullPolicy: Always
+          # Published by .github/workflows/image.yml (amd64 and arm64).
+          image: ghcr.io/jsawyerdev/scalescope-sample-workload:0.12.0
+          imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

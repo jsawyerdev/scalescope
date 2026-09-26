@@ -24,6 +24,20 @@ const MODEL_COLOR_VARS = {
 };
 const FALLBACK_MODEL_COLOR_VAR = "--chart-muted";
 
+// What the forecast is fitted on, per the API's demand_signal.
+const DEMAND_SIGNALS = {
+  request_rate: { field: "request_rate", unit: "req/s", label: "request rate" },
+  cpu_millicores: { field: "cpu_usage_millicores", unit: "mCPU", label: "total CPU" },
+};
+
+function demandSignal(forecast) {
+  return DEMAND_SIGNALS[forecast.demand_signal] || DEMAND_SIGNALS.request_rate;
+}
+
+function formatPercent(fraction) {
+  return fraction === null || fraction === undefined ? "-" : `${(fraction * 100).toFixed(0)}%`;
+}
+
 // Short fit description per model, shown as a hover tooltip on its name.
 // Mirrors README.md's "Forecast models" table.
 const MODEL_DESCRIPTIONS = {
@@ -93,7 +107,7 @@ function formatDuration(seconds) {
   return remaining ? `${minutes}m ${remaining}s` : `${minutes}m`;
 }
 
-function formatReq(value) {
+function formatDemand(value) {
   if (!Number.isFinite(value)) return "-";
   return Math.round(value).toLocaleString();
 }
@@ -324,8 +338,9 @@ function rampIndexes(length) {
 function renderForecastRamp(latest, forecast, recommendation, source) {
   const label = selectedForecastLabel(forecast);
   const tickSeconds = sourceTickSeconds(source);
+  const signal = demandSignal(forecast);
   const length = forecast.p50.length;
-  const latestRate = latest ? latest.request_rate : Number.NaN;
+  const latestRate = latest ? latest[signal.field] : Number.NaN;
   const peakP50 = length ? Math.max(...forecast.p50) : Number.NaN;
   const peakP90 = length ? Math.max(...forecast.p90) : Number.NaN;
 
@@ -333,9 +348,9 @@ function renderForecastRamp(latest, forecast, recommendation, source) {
   document.getElementById("forecast-ramp-window").textContent = length
     ? `${length} steps over ${formatDuration(length * tickSeconds)}`
     : "waiting for forecast";
-  document.getElementById("forecast-now").textContent = `${formatReq(latestRate)} req/s`;
-  document.getElementById("forecast-peak-p50").textContent = `${formatReq(peakP50)} req/s`;
-  document.getElementById("forecast-peak-p90").textContent = `${formatReq(peakP90)} req/s`;
+  document.getElementById("forecast-now").textContent = `${formatDemand(latestRate)} ${signal.unit}`;
+  document.getElementById("forecast-peak-p50").textContent = `${formatDemand(peakP50)} ${signal.unit}`;
+  document.getElementById("forecast-peak-p90").textContent = `${formatDemand(peakP90)} ${signal.unit}`;
 
   if (recommendation) {
     const delta = recommendation.recommended_replicas - recommendation.current_replicas;
@@ -346,13 +361,18 @@ function renderForecastRamp(latest, forecast, recommendation, source) {
     document.getElementById("forecast-confidence").textContent = `${Math.round(
       recommendation.confidence * 100
     )}%`;
-    document.getElementById("forecast-pod-load").textContent = `${(
-      recommendation.projected_utilization * 100
-    ).toFixed(0)}%`;
+    document.getElementById("forecast-pod-load").textContent = formatPercent(
+      recommendation.projected_utilization
+    );
+    document.getElementById("forecast-pod-capacity").textContent =
+      recommendation.capacity_per_pod === null
+        ? "unknown - holding replicas"
+        : `${formatDemand(recommendation.capacity_per_pod)} ${signal.unit} (${recommendation.capacity_source.replace("_", " ")})`;
   } else {
     document.getElementById("forecast-replicas").textContent = "-";
     document.getElementById("forecast-confidence").textContent = "-";
     document.getElementById("forecast-pod-load").textContent = "-";
+    document.getElementById("forecast-pod-capacity").textContent = "-";
   }
 
   const body = document.getElementById("forecast-ramp-body");
@@ -368,9 +388,9 @@ function renderForecastRamp(latest, forecast, recommendation, source) {
     const row = document.createElement("tr");
     const p90Delta = forecast.p90[index] - latestRate;
     appendCell(row, horizonLabel(index, tickSeconds));
-    appendCell(row, formatReq(forecast.p10[index]), "num");
-    appendCell(row, formatReq(forecast.p50[index]), "num");
-    appendCell(row, formatReq(forecast.p90[index]), "num");
+    appendCell(row, formatDemand(forecast.p10[index]), "num");
+    appendCell(row, formatDemand(forecast.p50[index]), "num");
+    appendCell(row, formatDemand(forecast.p90[index]), "num");
     const delta = appendCell(row, "", "num");
     delta.appendChild(deltaBadge(signedReqDelta(p90Delta), p90Delta));
     return row;
@@ -433,7 +453,7 @@ function renderTable(models) {
     const confidence = appendCell(row, "");
     confidence.appendChild(confidenceCell(m.confidence));
     appendCell(row, m.peak_forecast_p90.toFixed(0), "num");
-    appendCell(row, `${(m.projected_utilization * 100).toFixed(0)}%`, "num");
+    appendCell(row, formatPercent(m.projected_utilization), "num");
     return row;
   });
   replaceRows(body, rows);
@@ -466,10 +486,13 @@ function renderLog(observations) {
 function updateChart(observations, forecast, allForecasts, modelNames, confidenceByModel, source) {
   const selectedLabel = selectedForecastLabel(forecast);
   const tickSeconds = sourceTickSeconds(source);
+  const signal = demandSignal(forecast);
   document.getElementById("chart-model-name").textContent = selectedLabel;
+  document.getElementById("demand-note").textContent =
+    `observed ${signal.label} (${signal.unit}) plus selected forecast band`;
 
   const historyLabels = observations.map((o) => parseTs(o.ts).toLocaleTimeString());
-  const historyValues = observations.map((o) => o.request_rate);
+  const historyValues = observations.map((o) => o[signal.field]);
   const lastIndex = historyValues.length - 1;
   const forecastLabels = forecast.p50.map((_, i) => horizonLabel(i, tickSeconds));
   const labels = [...historyLabels, ...forecastLabels];
@@ -483,7 +506,7 @@ function updateChart(observations, forecast, allForecasts, modelNames, confidenc
 
   const datasets = [
     {
-      label: "request rate (observed)",
+      label: `${signal.label} (observed)`,
       data: [...historyValues, ...new Array(forecast.p50.length).fill(null)],
       borderColor: themeColor("--chart-observed"),
       backgroundColor: "transparent",
@@ -707,6 +730,8 @@ function renderReplay(result) {
     appendCell(row, `${s.n_anchors}`, "num");
     appendCell(row, s.mean_absolute_error.toFixed(2), "num");
     appendCell(row, `${s.mean_absolute_pct_error.toFixed(1)}%`, "num");
+    appendCell(row, s.p90_pinball_loss.toFixed(2), "num");
+    appendCell(row, `${(s.p90_coverage * 100).toFixed(0)}%`, "num");
     return row;
   });
   replaceRows(body, rows);

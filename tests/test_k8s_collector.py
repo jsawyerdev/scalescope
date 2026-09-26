@@ -15,9 +15,9 @@ from scalescope.k8s_collector import (
     KubernetesObservationCollector,
     KubernetesUnavailableError,
     KubernetesWorkloadTarget,
-    _label_selector,
     _parse_prometheus_gauges,
     _parse_quantity,
+    _selector_matches,
     _service_account_subject,
 )
 
@@ -68,48 +68,136 @@ def test_service_account_subject_decodes_projected_token(tmp_path: Path) -> None
     assert _service_account_subject(token_path) == subject
 
 
-def _deployment(namespace: str, name: str) -> SimpleNamespace:
+def _deployment(
+    namespace: str,
+    name: str,
+    labels: dict[str, str] | None = None,
+    cpu_request: str = "100m",
+    replicas: int = 1,
+) -> SimpleNamespace:
     return SimpleNamespace(
         metadata=SimpleNamespace(namespace=namespace, name=name),
+        spec=SimpleNamespace(
+            replicas=replicas,
+            selector=SimpleNamespace(
+                match_labels=labels or {"app": name}, match_expressions=None
+            ),
+            template=SimpleNamespace(
+                spec=SimpleNamespace(containers=[_container(cpu_request)])
+            ),
+        ),
+        status=SimpleNamespace(replicas=replicas),
     )
 
 
-def test_list_targets_returns_sorted_namespace_deployment_ids() -> None:
-    collector, mock_apps, _ = _collector()
+def _container(cpu_request: str) -> SimpleNamespace:
+    return SimpleNamespace(resources=SimpleNamespace(requests={"cpu": cpu_request}))
+
+
+def _pod(
+    name: str, labels: dict[str, str], cpu_request: str = "100m"
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        metadata=SimpleNamespace(name=name, labels=labels),
+        status=SimpleNamespace(phase="Running", container_statuses=[]),
+        spec=SimpleNamespace(containers=[_container(cpu_request)]),
+    )
+
+
+def _usage(pod: str, cpu: str, memory: str = "64Mi") -> dict[str, object]:
+    return {
+        "metadata": {"name": pod},
+        "containers": [{"usage": {"cpu": cpu, "memory": memory}}],
+    }
+
+
+def test_collect_lists_pods_and_metrics_once_per_namespace() -> None:
+    collector, mock_apps, mock_core = _collector()
     mock_apps.list_namespaced_deployment.side_effect = [
-        SimpleNamespace(items=[_deployment("payments", "api")]),
+        SimpleNamespace(
+            items=[_deployment("payments", "api"), _deployment("payments", "worker")]
+        ),
         SimpleNamespace(items=[_deployment("checkout", "api")]),
     ]
+    mock_core.list_namespaced_pod.return_value = SimpleNamespace(
+        items=[
+            _pod("api-1", {"app": "api"}),
+            _pod("api-2", {"app": "api"}),
+            _pod("worker-1", {"app": "worker"}),
+        ]
+    )
+    collector._custom.list_namespaced_custom_object.return_value = {
+        "items": [
+            _usage("api-1", "50m"),
+            _usage("api-2", "30m"),
+            _usage("worker-1", "10m"),
+        ]
+    }
 
-    targets = collector.list_targets(("payments", "checkout"))
+    result = collector.collect(("payments", "checkout"))
 
-    assert targets == [
+    assert result.targets == [
         KubernetesWorkloadTarget(namespace="checkout", deployment="api"),
         KubernetesWorkloadTarget(namespace="payments", deployment="api"),
+        KubernetesWorkloadTarget(namespace="payments", deployment="worker"),
     ]
+    assert mock_core.list_namespaced_pod.call_count == 2
+    assert collector._custom.list_namespaced_custom_object.call_count == 2
+    mock_apps.read_namespaced_deployment.assert_not_called()
+    rows = {row["workload"]: row for row in result.rows}
+    api = rows["payments:api"]
+    assert api["cpu_usage_millicores"] == 80.0
+    assert api["cpu_request_millicores"] == 100.0
+    assert api["cpu_usage_pct"] == 40.0
+    assert api["memory_usage_mb"] == 128.0
+    assert rows["payments:worker"]["cpu_usage_millicores"] == 10.0
 
 
-def test_list_targets_wraps_kubernetes_transport_errors() -> None:
+def test_collect_records_desired_replicas_from_spec() -> None:
+    collector, mock_apps, mock_core = _collector()
+    deployment = _deployment("payments", "api", replicas=3)
+    deployment.spec.replicas = 6  # just scaled; status has not caught up
+    mock_apps.list_namespaced_deployment.return_value = SimpleNamespace(
+        items=[deployment]
+    )
+    mock_core.list_namespaced_pod.return_value = SimpleNamespace(items=[])
+    collector._custom.list_namespaced_custom_object.return_value = {"items": []}
+
+    (row,) = collector.collect(("payments",)).rows
+
+    assert row["replicas"] == 3
+    assert row["desired_replicas"] == 6
+
+
+def test_collect_wraps_deployment_list_transport_errors() -> None:
     collector, mock_apps, _ = _collector()
     mock_apps.list_namespaced_deployment.side_effect = Urllib3HTTPError(
         "connection refused"
     )
 
     with pytest.raises(KubernetesUnavailableError, match="could not list"):
-        collector.list_targets(("payments",))
+        collector.collect(("payments",))
 
 
-def test_collect_wraps_deployment_transport_errors() -> None:
-    collector, mock_apps, _ = _collector()
-    mock_apps.read_namespaced_deployment.side_effect = Urllib3HTTPError(
-        "connection refused"
+def test_collect_reports_malformed_metrics_as_a_namespace_error() -> None:
+    collector, mock_apps, mock_core = _collector()
+    mock_apps.list_namespaced_deployment.return_value = SimpleNamespace(
+        items=[_deployment("payments", "api")]
     )
+    mock_core.list_namespaced_pod.return_value = SimpleNamespace(
+        items=[_pod("api-1", {"app": "api"})]
+    )
+    collector._custom.list_namespaced_custom_object.return_value = {
+        "items": [_usage("api-1", "fast")]
+    }
 
-    with pytest.raises(KubernetesUnavailableError, match="sample-workload"):
-        collector.collect(_TARGET)
+    result = collector.collect(("payments",))
+
+    assert result.rows == []
+    assert "malformed pod metrics" in result.errors[0]
 
 
-def test_label_selector_supports_match_labels_and_expressions() -> None:
+def test_selector_matching_supports_labels_and_expressions() -> None:
     selector = SimpleNamespace(
         match_labels={"app": "api"},
         match_expressions=[
@@ -119,18 +207,21 @@ def test_label_selector_supports_match_labels_and_expressions() -> None:
             SimpleNamespace(key="disabled", operator="DoesNotExist", values=None),
         ],
     )
+    base = {"app": "api", "tier": "web", "ready": "true"}
 
-    assert (
-        _label_selector(selector)
-        == "app=api,tier in (web,worker),track notin (canary),ready,!disabled"
-    )
+    assert _selector_matches(selector, base)
+    assert not _selector_matches(selector, {**base, "app": "other"})
+    assert not _selector_matches(selector, {**base, "tier": "batch"})
+    assert not _selector_matches(selector, {**base, "track": "canary"})
+    assert not _selector_matches(selector, {"app": "api", "tier": "web"})
+    assert not _selector_matches(selector, {**base, "disabled": "yes"})
 
 
-def test_label_selector_rejects_empty_selector() -> None:
+def test_selector_matching_rejects_empty_selector() -> None:
     selector = SimpleNamespace(match_labels=None, match_expressions=None)
 
     with pytest.raises(KubernetesUnavailableError, match="no pod selector"):
-        _label_selector(selector)
+        _selector_matches(selector, {"app": "api"})
 
 
 @pytest.mark.parametrize(
@@ -161,68 +252,105 @@ def test_prometheus_gauges_drop_non_finite_values() -> None:
     assert _parse_prometheus_gauges(text, names) == {"a": 1.5}
 
 
-def _pod(name: str, cpu_request: str) -> SimpleNamespace:
-    return SimpleNamespace(
-        metadata=SimpleNamespace(name=name),
-        status=SimpleNamespace(phase="Running", container_statuses=[]),
-        spec=SimpleNamespace(
-            containers=[
-                SimpleNamespace(
-                    resources=SimpleNamespace(requests={"cpu": cpu_request})
-                )
-            ]
-        ),
-    )
+class _FakePromResponse:
+    def __init__(self, payload: object) -> None:
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        pass
+
+    def json(self) -> object:
+        return self._payload
 
 
-def _collector_with_pod_metrics(
-    pod_metrics: dict[str, object],
+def _prometheus_collector(
+    deployments: list[SimpleNamespace], pods: list[SimpleNamespace]
 ) -> KubernetesObservationCollector:
-    collector, mock_apps, mock_core = _collector()
-    mock_apps.read_namespaced_deployment.return_value = SimpleNamespace(
-        spec=SimpleNamespace(
-            selector=SimpleNamespace(
-                match_labels={"app": "sample-workload"}, match_expressions=None
-            )
-        ),
-        status=SimpleNamespace(replicas=1),
-    )
-    mock_core.list_namespaced_pod.return_value = SimpleNamespace(
-        items=[_pod("pod-a", "100m")]
-    )
-    collector._custom.list_namespaced_custom_object.return_value = pod_metrics
-    return collector
-
-
-def test_collect_reports_usage_relative_to_cpu_request() -> None:
-    collector = _collector_with_pod_metrics(
-        {
-            "items": [
-                {
-                    "metadata": {"name": "pod-a"},
-                    "containers": [{"usage": {"cpu": "50m", "memory": "64Mi"}}],
-                }
-            ]
+    with (
+        patch("scalescope.k8s_collector.load_k8s_config", return_value="kubeconfig"),
+        patch("scalescope.k8s_collector.client") as mock_client,
+    ):
+        mock_client.AppsV1Api.return_value.list_namespaced_deployment.return_value = (
+            SimpleNamespace(items=deployments)
+        )
+        mock_client.CoreV1Api.return_value.list_namespaced_pod.return_value = (
+            SimpleNamespace(items=pods)
+        )
+        mock_client.CustomObjectsApi.return_value.list_namespaced_custom_object.return_value = {
+            "items": []
         }
-    )
-
-    row = collector.collect(_TARGET)
-
-    assert row["cpu_usage_pct"] == 50.0
-    assert row["memory_usage_mb"] == 64.0
+        return KubernetesObservationCollector(
+            prometheus_url="http://prometheus:9090/",
+            prometheus_rps_query="sum by (namespace, pod) (rate(x[2m]))",
+        )
 
 
-def test_collect_wraps_malformed_pod_metrics() -> None:
-    collector = _collector_with_pod_metrics(
-        {
-            "items": [
-                {
-                    "metadata": {"name": "pod-a"},
-                    "containers": [{"usage": {"cpu": "fast", "memory": "64Mi"}}],
+def _series(namespace: str, pod: str, value: str) -> dict[str, object]:
+    return {"metric": {"namespace": namespace, "pod": pod}, "value": [0, value]}
+
+
+def test_one_prometheus_query_attributes_pod_rates_to_deployments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    def fake_get(url: str, params: dict[str, str], timeout: float) -> object:
+        calls.append((url, params))
+        return _FakePromResponse(
+            {
+                "data": {
+                    "result": [
+                        _series("payments", "api-1", "12.5"),
+                        _series("payments", "api-2", "2.5"),
+                        _series("payments", "api-worker-1", "100"),
+                        _series("payments", "api-3", "NaN"),
+                    ]
                 }
-            ]
-        }
+            }
+        )
+
+    monkeypatch.setattr("scalescope.k8s_collector.httpx.get", fake_get)
+    collector = _prometheus_collector(
+        [_deployment("payments", "api"), _deployment("payments", "api-worker")],
+        [
+            _pod("api-1", {"app": "api"}),
+            _pod("api-2", {"app": "api"}),
+            _pod("api-3", {"app": "api"}),
+            _pod("api-worker-1", {"app": "api-worker"}),
+        ],
     )
 
-    with pytest.raises(KubernetesUnavailableError, match="malformed pod metrics"):
-        collector.collect(_TARGET)
+    rows = {row["workload"]: row for row in collector.collect(("payments",)).rows}
+
+    assert calls == [
+        (
+            "http://prometheus:9090/api/v1/query",
+            {"query": "sum by (namespace, pod) (rate(x[2m]))"},
+        )
+    ]
+    assert rows["payments:api"]["request_rate"] == 15.0
+    assert rows["payments:api-worker"]["request_rate"] == 100.0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"data": {"result": []}},
+        {"data": {"result": [{"metric": {"pod": "api-1"}, "value": [0, "1"]}]}},
+        {"error": "bad query"},
+    ],
+)
+def test_request_rate_is_zero_without_a_matching_prometheus_series(
+    monkeypatch: pytest.MonkeyPatch, payload: object
+) -> None:
+    monkeypatch.setattr(
+        "scalescope.k8s_collector.httpx.get",
+        lambda url, params, timeout: _FakePromResponse(payload),
+    )
+    collector = _prometheus_collector(
+        [_deployment("payments", "api")], [_pod("api-1", {"app": "api"})]
+    )
+
+    (row,) = collector.collect(("payments",)).rows
+
+    assert row["request_rate"] == 0.0

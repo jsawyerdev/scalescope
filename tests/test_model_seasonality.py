@@ -9,11 +9,22 @@ from scalescope.models import lightgbm_model, statsforecast_model
 
 def test_auto_ets_uses_detected_period(monkeypatch: pytest.MonkeyPatch) -> None:
     captured = _install_auto_ets_fakes(monkeypatch)
+    monkeypatch.setattr(statsforecast_model, "detect_period", lambda history: 24)
+
+    statsforecast_model.AutoEtsModel().predict(np.arange(120, dtype=float), horizon=3)
+
+    assert captured == [24]
+
+
+def test_auto_ets_drops_periods_longer_than_ets_supports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _install_auto_ets_fakes(monkeypatch)
     monkeypatch.setattr(statsforecast_model, "detect_period", lambda history: 300)
 
     statsforecast_model.AutoEtsModel().predict(np.arange(120, dtype=float), horizon=3)
 
-    assert captured == [300]
+    assert captured == [1]
 
 
 def test_auto_ets_keeps_season_length_one_without_detected_period(
