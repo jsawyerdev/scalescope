@@ -81,23 +81,28 @@ def seed_observations(store: Store, workload: str, n: int) -> None:
         )
 
 
+def _isolated_source(monkeypatch: pytest.MonkeyPatch, **fields: object) -> None:
+    """Swap in a private copy of app_state["source"] for this test.
+
+    The app's background observe loop keeps a reference to the original dict
+    and writes to it concurrently (e.g. its kubeconfig error), so mutating
+    that dict in place races with it.
+    """
+    monkeypatch.setitem(app_state, "source", {**app_state["source"], **fields})
+
+
 def test_source_reports_stale_observe_collection_as_disconnected(
-    client: TestClient,
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    original_source = dict(app_state["source"])
-    app_state["source"].update(
-        {
-            "mode": "observe",
-            "connected": True,
-            "last_success_ts": datetime.now(UTC) - timedelta(seconds=120),
-            "last_error": None,
-        }
+    _isolated_source(
+        monkeypatch,
+        mode="observe",
+        connected=True,
+        last_success_ts=datetime.now(UTC) - timedelta(seconds=120),
+        last_error=None,
     )
-    try:
-        resp = client.get("/api/source")
-    finally:
-        app_state["source"].clear()
-        app_state["source"].update(original_source)
+
+    resp = client.get("/api/source")
 
     assert resp.status_code == 200
     body = resp.json()
@@ -106,29 +111,24 @@ def test_source_reports_stale_observe_collection_as_disconnected(
 
 
 def test_observe_workload_list_prefers_visible_kubernetes_targets(
-    client: TestClient, store: Store
+    client: TestClient, store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seed_observations(store, "sample-workload", 1)
     seed_observations(store, "scalescope-demo:sample-workload", 1)
-    original_source = dict(app_state["source"])
-    app_state["source"].update(
-        {
-            "mode": "observe",
-            "targets": [
-                {
-                    "id": "scalescope-demo:sample-workload",
-                    "namespace": "scalescope-demo",
-                    "deployment": "sample-workload",
-                    "metrics_url_configured": True,
-                }
-            ],
-        }
+    _isolated_source(
+        monkeypatch,
+        mode="observe",
+        targets=[
+            {
+                "id": "scalescope-demo:sample-workload",
+                "namespace": "scalescope-demo",
+                "deployment": "sample-workload",
+                "metrics_url_configured": True,
+            }
+        ],
     )
-    try:
-        resp = client.get("/api/workloads")
-    finally:
-        app_state["source"].clear()
-        app_state["source"].update(original_source)
+
+    resp = client.get("/api/workloads")
 
     assert resp.status_code == 200
     assert resp.json() == ["scalescope-demo:sample-workload"]
