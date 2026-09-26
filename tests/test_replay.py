@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from scalescope.models.baselines import NaiveModel
-from scalescope.replay import _anchors, replay_score
+from scalescope.replay import _anchors, _pinball_loss, replay_score
 
 
 def test_anchors_empty_when_insufficient_history() -> None:
@@ -35,3 +36,18 @@ def test_replay_score_omits_model_with_no_valid_anchors() -> None:
     history = np.full(20, 100.0)
     scores = replay_score(history, {"naive": NaiveModel()}, min_history=30, horizon=5)
     assert scores == []
+
+
+def test_replay_scores_p90_pinball_and_coverage() -> None:
+    history = np.full(100, 500.0)
+    scores = replay_score(history, {"naive": NaiveModel()}, min_history=8, horizon=5)
+    # Flat series: p90 sits above every actual value, so coverage is total and
+    # the loss is (1 - 0.9) times the band above the actuals.
+    assert scores[0].p90_coverage == 1.0
+    assert scores[0].p90_pinball_loss > 0.0
+
+
+def test_pinball_loss_penalizes_under_forecasts_more() -> None:
+    actual = np.array([100.0])
+    assert _pinball_loss(actual, np.array([90.0]), 0.9) == pytest.approx(9.0)
+    assert _pinball_loss(actual, np.array([110.0]), 0.9) == pytest.approx(1.0)

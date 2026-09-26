@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +16,14 @@ from fastapi.staticfiles import StaticFiles
 
 from scalescope.api.routes import router
 from scalescope.auth import BasicAuthMiddleware
-from scalescope.capacity import STARTUP_LEAD_STEPS, recommend_replicas
+from scalescope.capacity import (
+    STARTUP_LEAD_STEPS,
+    ScaleDownStabilizer,
+    recommend_replicas,
+    resolve_capacity,
+)
 from scalescope.config import settings
+from scalescope.demand import demand_history, demand_signal
 from scalescope.diagnosis import diagnose
 from scalescope.k8s_actuator import ActuationError, HpaConflictError, KubernetesActuator
 from scalescope.k8s_collector import (
@@ -33,6 +40,10 @@ from scalescope.storage import Store
 
 configure_logging()
 logger = logging.getLogger(__name__)
+
+# Retention is enforced this often rather than every tick: a DELETE scans
+# the table, and data only needs to stay roughly within the window.
+_PRUNE_EVERY_TICKS = 300
 
 
 def _init_source_state() -> dict[str, Any]:
@@ -65,13 +76,27 @@ def _init_source_state() -> dict[str, Any]:
     }
 
 
+async def _prune_if_due(store: Store, tick: int) -> None:
+    if tick % _PRUNE_EVERY_TICKS:
+        return
+    cutoff = datetime.now(UTC) - timedelta(hours=settings.retention_hours)
+    deleted = await asyncio.to_thread(store.prune, cutoff)
+    if deleted:
+        logger.info("pruned %d observations older than %s", deleted, cutoff)
+
+
 async def _simulation_loop(store: Store) -> None:
     simulator = WorkloadSimulator()
     app_state["simulator"] = simulator
+    tick = 0
     while True:
         row = simulator.step()
-        store.insert_observation(row)
+        # Store calls block on its lock, which API reads can hold; keep them
+        # off the event loop so health checks never stall behind a query.
+        await asyncio.to_thread(store.insert_observation, row)
         app_state["source"]["last_success_ts"] = datetime.now(UTC)
+        await _prune_if_due(store, tick)
+        tick += 1
         await asyncio.sleep(settings.simulation_tick_seconds)
 
 
@@ -96,30 +121,55 @@ def _target_dicts(
 
 
 def _actuate(
-    store: Store, actuator: KubernetesActuator, target: KubernetesWorkloadTarget
+    store: Store,
+    actuator: KubernetesActuator,
+    target: KubernetesWorkloadTarget,
+    stabilizer: ScaleDownStabilizer,
 ) -> None:
     source = app_state["source"]
     df = store.recent_observations(target.workload_id, settings.history_window_steps)
     if df.is_empty():
         return
 
-    diag = diagnose(df)
+    diag = diagnose(df, max_replicas=settings.max_replicas)
     if not diag.scaling_will_help:
         source["last_actuation_error"] = f"skipped: {diag.explanation}"
         return
 
-    current_replicas = int(df["replicas"][-1])
+    signal = demand_signal(df)
+    capacity = resolve_capacity(df, signal, settings.capacity_per_pod_rps)
+    if capacity.per_pod is None:
+        source["last_actuation_error"] = (
+            "skipped: per-pod capacity unknown; set SCALESCOPE_CAPACITY_PER_POD_RPS, "
+            "give the Deployment a CPU request, or wait for enough history to "
+            "estimate it"
+        )
+        return
+
+    # spec.replicas, not status: status lags a scale write by many seconds,
+    # and planning from it would apply the same step twice.
+    current_replicas = int(df["desired_replicas"][-1])
     forecast = AutoEtsModel().predict(
-        df["request_rate"].to_numpy(), settings.forecast_horizon_steps
+        demand_history(df, signal), settings.forecast_horizon_steps
     )
-    rec = recommend_replicas(current_replicas, forecast, peak_step=STARTUP_LEAD_STEPS)
-    if rec.recommended_replicas == current_replicas:
+    recommended = stabilizer.stabilize(
+        time.monotonic(),
+        current_replicas,
+        recommend_replicas(
+            current_replicas,
+            forecast,
+            capacity,
+            settings.scaling_policy,
+            peak_step=STARTUP_LEAD_STEPS,
+        ).recommended_replicas,
+    )
+    if recommended == current_replicas:
         return
 
     try:
-        actuator.scale(target.deployment, rec.recommended_replicas)
+        actuator.scale(target.deployment, recommended)
         source["last_actuation_ts"] = datetime.now(UTC)
-        source["last_actuation_replicas"] = rec.recommended_replicas
+        source["last_actuation_replicas"] = recommended
         source["last_actuation_error"] = None
     except (HpaConflictError, ActuationError) as exc:
         logger.warning("actuation skipped: %s", exc)
@@ -138,6 +188,8 @@ async def _observe_loop(store: Store) -> None:
             KubernetesObservationCollector,
             kubeconfig_path=settings.k8s_kubeconfig,
             metrics_urls=metrics_urls,
+            prometheus_url=settings.prometheus_url,
+            prometheus_rps_query=settings.prometheus_rps_query,
         )
         source["cluster_server"] = collector.cluster_server
         source["cluster_auth_type"] = collector.auth_type
@@ -161,41 +213,36 @@ async def _observe_loop(store: Store) -> None:
             settings.k8s_namespace,
             settings.k8s_deployment,
         )
+    stabilizer = ScaleDownStabilizer(settings.scale_down_stabilization_seconds)
 
+    tick = 0
     while True:
         try:
-            targets = await asyncio.to_thread(
-                collector.list_targets, settings.k8s_namespaces
-            )
-            source["targets"] = _target_dicts(targets, metrics_urls)
-            if not targets:
+            result = await asyncio.to_thread(collector.collect, settings.k8s_namespaces)
+            source["targets"] = _target_dicts(result.targets, metrics_urls)
+            if not result.targets:
                 raise KubernetesUnavailableError(
                     f"no deployments visible in namespaces {settings.k8s_namespaces}"
                 )
-
-            target_errors: list[str] = []
-            rows_inserted = 0
-            for target in targets:
-                try:
-                    row = await asyncio.to_thread(collector.collect, target)
-                except KubernetesUnavailableError as exc:
-                    target_errors.append(str(exc))
-                    continue
-                store.insert_observation(row)
-                rows_inserted += 1
-                if actuator is not None and target == primary_target:
-                    await asyncio.to_thread(_actuate, store, actuator, target)
-
-            if rows_inserted == 0:
+            if not result.rows:
                 raise KubernetesUnavailableError(
-                    "; ".join(target_errors) or "no observations collected this tick"
+                    "; ".join(result.errors) or "no observations collected this tick"
+                )
+
+            for row in result.rows:
+                await asyncio.to_thread(store.insert_observation, row)
+            if actuator is not None and primary_target.workload_id in {
+                row["workload"] for row in result.rows
+            }:
+                await asyncio.to_thread(
+                    _actuate, store, actuator, primary_target, stabilizer
                 )
 
             source["connected"] = True
             source["last_success_ts"] = datetime.now(UTC)
             source["last_error"] = (
-                f"{len(target_errors)} target(s) failed: {target_errors[0]}"
-                if target_errors
+                f"{len(result.errors)} target(s) failed: {result.errors[0]}"
+                if result.errors
                 else None
             )
         except KubernetesUnavailableError as exc:
@@ -205,6 +252,8 @@ async def _observe_loop(store: Store) -> None:
             )
             source["connected"] = False
             source["last_error"] = str(exc)
+        await _prune_if_due(store, tick)
+        tick += 1
         await asyncio.sleep(settings.simulation_tick_seconds)
 
 

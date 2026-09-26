@@ -7,11 +7,27 @@ import os
 from dataclasses import dataclass, field
 from typing import Literal, cast
 
+from scalescope.capacity import (
+    DEFAULT_MAX_REPLICAS,
+    DEFAULT_MIN_REPLICAS,
+    DEFAULT_TARGET_UTILIZATION,
+    ScalingPolicy,
+)
+
+# Observations older than this are pruned. The forecasters read at most
+# SCALESCOPE_HISTORY_STEPS rows and replay at most 5000, so a day covers
+# both at any tick of 2s or more.
+DEFAULT_RETENTION_HOURS = 24.0
+
 Mode = Literal["demo", "observe"]
 
 _VALID_MODES = frozenset({"demo", "observe"})
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off", ""})
+
+# One query per tick, returning requests/s per pod; ScaleScope attributes
+# pods to Deployments itself through their label selectors.
+DEFAULT_PROMETHEUS_RPS_QUERY = "sum by (namespace, pod) (rate(http_requests_total[2m]))"
 
 
 def _env(name: str, default: str) -> str:
@@ -35,6 +51,11 @@ def _float_env(name: str, default: float) -> float:
         return float(raw)
     except ValueError as exc:
         raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+
+
+def _optional_float_env(name: str) -> float | None:
+    raw = _optional_env(name)
+    return None if raw is None else _float_env(name, 0.0)
 
 
 def _int_env(name: str, default: int) -> int:
@@ -106,6 +127,49 @@ class Settings:
     # Opt-in on top of mode=observe: observing a cluster must never imply
     # writing to it by default.
     actuate: bool = field(default_factory=lambda: _bool_env("SCALESCOPE_ACTUATE"))
+    # Requests/s one pod serves at 100% of its CPU request. Unset -> estimated
+    # per workload from its own history.
+    capacity_per_pod_rps: float | None = field(
+        default_factory=lambda: _optional_float_env("SCALESCOPE_CAPACITY_PER_POD_RPS")
+    )
+    min_replicas: int = field(
+        default_factory=lambda: _int_env(
+            "SCALESCOPE_MIN_REPLICAS", DEFAULT_MIN_REPLICAS
+        )
+    )
+    max_replicas: int = field(
+        default_factory=lambda: _int_env(
+            "SCALESCOPE_MAX_REPLICAS", DEFAULT_MAX_REPLICAS
+        )
+    )
+    target_utilization: float = field(
+        default_factory=lambda: _float_env(
+            "SCALESCOPE_TARGET_UTILIZATION", DEFAULT_TARGET_UTILIZATION
+        )
+    )
+    # 0 disables it: the asymmetric scale-down rule already refuses to drop
+    # pods the forecast horizon still needs. A longer window trades pod cost
+    # for fewer scale changes, like the HPA's default 300s.
+    scale_down_stabilization_seconds: float = field(
+        default_factory=lambda: _float_env(
+            "SCALESCOPE_SCALE_DOWN_STABILIZATION_SECONDS", 0.0
+        )
+    )
+    retention_hours: float = field(
+        default_factory=lambda: _float_env(
+            "SCALESCOPE_RETENTION_HOURS", DEFAULT_RETENTION_HOURS
+        )
+    )
+    # Optional per-workload demand source for OBSERVE mode: an instant query
+    # whose series carry `namespace` and `pod` labels.
+    prometheus_url: str | None = field(
+        default_factory=lambda: _optional_env("SCALESCOPE_PROMETHEUS_URL")
+    )
+    prometheus_rps_query: str = field(
+        default_factory=lambda: _env(
+            "SCALESCOPE_PROMETHEUS_RPS_QUERY", DEFAULT_PROMETHEUS_RPS_QUERY
+        )
+    )
     # Both unset -> no auth (default, e.g. local zero-config DEMO). Both set
     # -> HTTP Basic Auth required for every request except /healthz.
     auth_username: str | None = field(
@@ -131,10 +195,43 @@ class Settings:
             raise ValueError(
                 "SCALESCOPE_K8S_NAMESPACES must not be empty in observe mode"
             )
+        if self.capacity_per_pod_rps is not None and not (
+            math.isfinite(self.capacity_per_pod_rps) and self.capacity_per_pod_rps > 0
+        ):
+            raise ValueError(
+                "SCALESCOPE_CAPACITY_PER_POD_RPS must be a finite number greater than 0"
+            )
+        if not 1 <= self.min_replicas <= self.max_replicas:
+            raise ValueError(
+                "SCALESCOPE_MIN_REPLICAS must be at least 1 and no greater than "
+                "SCALESCOPE_MAX_REPLICAS"
+            )
+        if not (
+            math.isfinite(self.scale_down_stabilization_seconds)
+            and self.scale_down_stabilization_seconds >= 0
+        ):
+            raise ValueError(
+                "SCALESCOPE_SCALE_DOWN_STABILIZATION_SECONDS must be a finite "
+                "number of seconds, 0 or more"
+            )
+        if not (math.isfinite(self.retention_hours) and self.retention_hours > 0):
+            raise ValueError(
+                "SCALESCOPE_RETENTION_HOURS must be a finite number greater than 0"
+            )
+        if not 0 < self.target_utilization <= 1:
+            raise ValueError("SCALESCOPE_TARGET_UTILIZATION must be in (0, 1]")
         if bool(self.auth_username) != bool(self.auth_password):
             raise ValueError(
                 "SCALESCOPE_AUTH_USERNAME and SCALESCOPE_AUTH_PASSWORD must be set together"
             )
+
+    @property
+    def scaling_policy(self) -> ScalingPolicy:
+        return ScalingPolicy(
+            min_replicas=self.min_replicas,
+            max_replicas=self.max_replicas,
+            target_utilization=self.target_utilization,
+        )
 
 
 settings = Settings()

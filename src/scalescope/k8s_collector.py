@@ -12,8 +12,9 @@ request-level instrumentation this collector does not otherwise have. When
 `metrics_url` is configured, they're read from that workload's own
 Prometheus `/metrics` (see `sample-workload/app/main.py`'s
 `sample_workload_demand_rps`/`latency_p95_ms`/`error_rate` gauges for the
-expected contract); when it isn't, they're reported as 0.0 rather than a
-fabricated value. `cpu_throttled_pct` has no source in either case yet
+expected contract). Otherwise `request_rate` can come from a Prometheus
+server via one per-pod PromQL query each tick. Anything without a source is
+reported as 0.0 rather than a fabricated value. `cpu_throttled_pct` has no source in either case yet
 (needs cAdvisor container_cpu_cfs_throttled data, not exposed here) and is
 always 0.0.
 """
@@ -180,50 +181,71 @@ def _parse_cpu_millicores(value: str) -> float:
     return _parse_quantity(value) * 1000
 
 
-def _cpu_request_millicores(pods: list[Any]) -> float:
+def _cpu_request_millicores(containers: list[Any]) -> float:
     total = 0.0
-    for pod in pods:
-        for container in pod.spec.containers:
-            resource_requests = (
-                container.resources and container.resources.requests
-            ) or {}
-            cpu_request = resource_requests.get("cpu")
-            if cpu_request:
-                total += _parse_cpu_millicores(cpu_request)
+    for container in containers:
+        resource_requests = (container.resources and container.resources.requests) or {}
+        cpu_request = resource_requests.get("cpu")
+        if cpu_request:
+            total += _parse_cpu_millicores(cpu_request)
     return total
 
 
-def _label_selector(selector: object) -> str:
+def _selector_matches(selector: object, labels: dict[str, str]) -> bool:
+    """Client-side `LabelSelector` match, so one pod list serves a namespace.
+
+    Raises KubernetesUnavailableError for an empty selector or an operator
+    outside the four Kubernetes defines.
+    """
     match_labels = getattr(selector, "match_labels", None) or {}
-    parts = [f"{key}={value}" for key, value in sorted(match_labels.items())]
-    for expression in getattr(selector, "match_expressions", None) or []:
-        key = expression.key
-        operator = expression.operator
+    expressions = getattr(selector, "match_expressions", None) or []
+    if not match_labels and not expressions:
+        raise KubernetesUnavailableError("deployment has no pod selector")
+    if any(labels.get(key) != value for key, value in match_labels.items()):
+        return False
+    for expression in expressions:
+        key, operator = expression.key, expression.operator
         values = expression.values or []
         if operator == "In":
-            parts.append(f"{key} in ({','.join(values)})")
+            matched = labels.get(key) in values
         elif operator == "NotIn":
-            parts.append(f"{key} notin ({','.join(values)})")
+            matched = labels.get(key) not in values
         elif operator == "Exists":
-            parts.append(key)
+            matched = key in labels
         elif operator == "DoesNotExist":
-            parts.append(f"!{key}")
+            matched = key not in labels
         else:
             raise KubernetesUnavailableError(
                 f"unsupported Kubernetes label selector operator: {operator}"
             )
-    if not parts:
-        raise KubernetesUnavailableError("deployment has no pod selector")
-    return ",".join(parts)
+        if not matched:
+            return False
+    return True
+
+
+@dataclass(frozen=True)
+class CollectionResult:
+    """One tick's rows, plus the targets seen and any per-target failures."""
+
+    targets: list[KubernetesWorkloadTarget]
+    rows: list[dict[str, Any]]
+    errors: list[str]
 
 
 class KubernetesObservationCollector:
-    """Collects observation rows for visible Kubernetes Deployments."""
+    """Collects observation rows for visible Kubernetes Deployments.
+
+    Each tick costs one Deployment list, plus one Pod list and one PodMetrics
+    list per namespace that has Deployments, plus at most one Prometheus
+    query, however many Deployments there are.
+    """
 
     def __init__(
         self,
         kubeconfig_path: str | None = None,
         metrics_urls: dict[str, str] | None = None,
+        prometheus_url: str | None = None,
+        prometheus_rps_query: str | None = None,
     ) -> None:
         self.auth_type = load_k8s_config(kubeconfig_path)
         self.auth_identity = (
@@ -232,90 +254,189 @@ class KubernetesObservationCollector:
             else "kubeconfig"
         )
         self._metrics_urls = metrics_urls or {}
+        self._prometheus_url = prometheus_url.rstrip("/") if prometheus_url else None
+        self._prometheus_rps_query = prometheus_rps_query
         self._apps = client.AppsV1Api()
         self._core = client.CoreV1Api()
         self._custom = client.CustomObjectsApi()
         self.cluster_server = client.Configuration.get_default_copy().host
 
-    def list_targets(
-        self, namespaces: tuple[str, ...]
-    ) -> list[KubernetesWorkloadTarget]:
-        try:
-            if namespaces == ("*",):
-                deployments = self._apps.list_deployment_for_all_namespaces(
-                    _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
-                ).items
-            else:
-                deployments = []
-                for namespace in namespaces:
-                    deployments.extend(
-                        self._apps.list_namespaced_deployment(
-                            namespace,
-                            _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
-                        ).items
-                    )
-        except (ApiException, Urllib3HTTPError) as exc:
-            _raise_unavailable("could not list observable deployments", exc)
+    def collect(self, namespaces: tuple[str, ...]) -> CollectionResult:
+        """Observe every Deployment in `namespaces` (`("*",)` for all).
 
-        return sorted(
+        Raises KubernetesUnavailableError if Deployments cannot be listed;
+        failures confined to one namespace or Deployment are returned in
+        `errors` instead.
+        """
+        deployments = [
+            deployment
+            for deployment in self._list_deployments(namespaces)
+            if deployment.metadata.namespace and deployment.metadata.name
+        ]
+        by_namespace: dict[str, list[Any]] = {}
+        for deployment in deployments:
+            by_namespace.setdefault(str(deployment.metadata.namespace), []).append(
+                deployment
+            )
+
+        targets = sorted(
             KubernetesWorkloadTarget(
                 namespace=str(deployment.metadata.namespace),
                 deployment=str(deployment.metadata.name),
             )
             for deployment in deployments
-            if deployment.metadata.namespace and deployment.metadata.name
         )
+        rows: list[dict[str, Any]] = []
+        errors: list[str] = []
+        pod_request_rates = self._prometheus_pod_request_rates()
+        for namespace, namespace_deployments in sorted(by_namespace.items()):
+            try:
+                pods = self._list_pods(namespace)
+                usage_by_pod = self._pod_usage(namespace)
+            except KubernetesUnavailableError as exc:
+                errors.append(str(exc))
+                continue
+            for deployment in namespace_deployments:
+                try:
+                    rows.append(
+                        self._observe(deployment, pods, usage_by_pod, pod_request_rates)
+                    )
+                except KubernetesUnavailableError as exc:
+                    errors.append(f"{namespace}/{deployment.metadata.name}: {exc}")
+        return CollectionResult(targets=targets, rows=rows, errors=errors)
 
-    def collect(self, target: KubernetesWorkloadTarget) -> dict[str, Any]:
-        """One observation row for `target`.
-
-        Raises KubernetesUnavailableError if the Deployment, its Pods, or
-        their metrics cannot be read or parsed.
-        """
+    def _list_deployments(self, namespaces: tuple[str, ...]) -> list[Any]:
         try:
-            deployment = self._apps.read_namespaced_deployment(
-                target.deployment,
-                target.namespace,
-                _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
+            if namespaces == ("*",):
+                return list(
+                    self._apps.list_deployment_for_all_namespaces(
+                        _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
+                    ).items
+                )
+            deployments: list[Any] = []
+            for namespace in namespaces:
+                deployments.extend(
+                    self._apps.list_namespaced_deployment(
+                        namespace,
+                        _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
+                    ).items
+                )
+            return deployments
+        except (ApiException, Urllib3HTTPError) as exc:
+            _raise_unavailable("could not list observable deployments", exc)
+
+    def _list_pods(self, namespace: str) -> list[Any]:
+        try:
+            return list(
+                self._core.list_namespaced_pod(
+                    namespace, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS
+                ).items
             )
         except (ApiException, Urllib3HTTPError) as exc:
-            _raise_unavailable(
-                f"deployment {target.namespace}/{target.deployment} unreachable", exc
-            )
+            _raise_unavailable(f"pods in {namespace} unreachable", exc)
 
-        label_selector = _label_selector(deployment.spec.selector)
+    def _pod_usage(self, namespace: str) -> dict[str, tuple[float, float]]:
+        """(CPU millicores, memory bytes) per pod; empty without metrics-server."""
         try:
-            pods = self._core.list_namespaced_pod(
-                target.namespace,
-                label_selector=label_selector,
+            metrics = self._custom.list_namespaced_custom_object(
+                "metrics.k8s.io",
+                "v1beta1",
+                namespace,
+                "pods",
                 _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
-            ).items
-        except (ApiException, Urllib3HTTPError) as exc:
-            _raise_unavailable(
-                f"pods for {target.namespace}/{target.deployment} unreachable", exc
             )
+        except ApiException:
+            logger.warning(
+                "metrics.k8s.io unavailable in namespace %s (metrics-server not "
+                "installed, or RBAC lacks read access) - reporting 0 usage",
+                namespace,
+            )
+            return {}
+        except Urllib3HTTPError as exc:
+            _raise_unavailable(f"pod metrics in {namespace} unreachable", exc)
 
-        pending_pods = sum(1 for p in pods if p.status.phase == "Pending")
-        restarts = sum(
-            cs.restart_count for p in pods for cs in (p.status.container_statuses or [])
+        try:
+            usage: dict[str, tuple[float, float]] = {}
+            for item in metrics.get("items", []):
+                cpu = memory = 0.0
+                for container in item["containers"]:
+                    cpu += _parse_cpu_millicores(container["usage"]["cpu"])
+                    memory += _parse_quantity(container["usage"]["memory"])
+                usage[item["metadata"]["name"]] = (cpu, memory)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise KubernetesUnavailableError(
+                f"malformed pod metrics in {namespace}: {exc!r}"
+            ) from exc
+        return usage
+
+    def _observe(
+        self,
+        deployment: Any,
+        namespace_pods: list[Any],
+        usage_by_pod: dict[str, tuple[float, float]],
+        pod_request_rates: dict[tuple[str, str], float] | None,
+    ) -> dict[str, Any]:
+        target = KubernetesWorkloadTarget(
+            namespace=str(deployment.metadata.namespace),
+            deployment=str(deployment.metadata.name),
         )
-        cpu_usage_pct, memory_usage_mb = self._pod_resource_usage(target, pods)
+        selector = deployment.spec.selector
+        pods = [
+            pod
+            for pod in namespace_pods
+            if _selector_matches(selector, pod.metadata.labels or {})
+        ]
+        try:
+            cpu_request_per_pod = _cpu_request_millicores(
+                deployment.spec.template.spec.containers
+            )
+            cpu_requested = sum(
+                _cpu_request_millicores(pod.spec.containers) for pod in pods
+            )
+        except (TypeError, ValueError) as exc:
+            raise KubernetesUnavailableError(
+                f"unparseable CPU request: {exc!r}"
+            ) from exc
+
+        usage = [usage_by_pod.get(pod.metadata.name, (0.0, 0.0)) for pod in pods]
+        cpu_used = sum(cpu for cpu, _ in usage)
+        memory_used = sum(memory for _, memory in usage)
+        cpu_usage_pct = (
+            min(100.0, cpu_used / cpu_requested * 100) if cpu_requested else 0.0
+        )
         scraped = self._scrape_workload_metrics(
             self._metrics_urls.get(target.workload_id)
         )
+        request_rate = scraped.get("request_rate")
+        if request_rate is None and pod_request_rates:
+            rates = [
+                pod_request_rates[(target.namespace, pod.metadata.name)]
+                for pod in pods
+                if (target.namespace, pod.metadata.name) in pod_request_rates
+            ]
+            request_rate = sum(rates) if rates else None
 
+        replicas = deployment.status.replicas or 0
+        desired = deployment.spec.replicas
         return {
             "ts": datetime.now(UTC),
             "workload": target.workload_id,
-            "replicas": deployment.status.replicas or 0,
-            "request_rate": scraped.get("request_rate", 0.0),
-            "cpu_usage_pct": cpu_usage_pct,
+            "replicas": replicas,
+            "desired_replicas": replicas if desired is None else desired,
+            "request_rate": request_rate if request_rate is not None else 0.0,
+            "cpu_usage_pct": round(cpu_usage_pct, 2),
+            "cpu_usage_millicores": round(cpu_used, 1),
+            "cpu_request_millicores": round(cpu_request_per_pod, 1),
             "cpu_throttled_pct": 0.0,
-            "memory_usage_mb": memory_usage_mb,
+            "memory_usage_mb": round(memory_used / (1024 * 1024), 2),
             "latency_p95_ms": scraped.get("latency_p95_ms", 0.0),
             "error_rate": scraped.get("error_rate", 0.0),
-            "pending_pods": pending_pods,
-            "restarts": restarts,
+            "pending_pods": sum(1 for pod in pods if pod.status.phase == "Pending"),
+            "restarts": sum(
+                status.restart_count
+                for pod in pods
+                for status in (pod.status.container_statuses or [])
+            ),
         }
 
     def _scrape_workload_metrics(self, metrics_url: str | None) -> dict[str, float]:
@@ -330,56 +451,28 @@ class KubernetesObservationCollector:
         raw = _parse_prometheus_gauges(response.text, set(_SCRAPED_GAUGE_NAMES))
         return {_SCRAPED_GAUGE_NAMES[name]: value for name, value in raw.items()}
 
-    def _pod_resource_usage(
-        self, target: KubernetesWorkloadTarget, pods: list[Any]
-    ) -> tuple[float, float]:
-        if not pods:
-            return 0.0, 0.0
-
+    def _prometheus_pod_request_rates(self) -> dict[tuple[str, str], float] | None:
+        """Requests/s per (namespace, pod) from one instant query; None if unavailable."""
+        if self._prometheus_url is None or not self._prometheus_rps_query:
+            return None
         try:
-            metrics = self._custom.list_namespaced_custom_object(
-                "metrics.k8s.io",
-                "v1beta1",
-                target.namespace,
-                "pods",
-                _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
+            response = httpx.get(
+                f"{self._prometheus_url}/api/v1/query",
+                params={"query": self._prometheus_rps_query},
+                timeout=5.0,
             )
-        except ApiException:
+            response.raise_for_status()
+            rates: dict[tuple[str, str], float] = {}
+            for series in response.json()["data"]["result"]:
+                labels = series["metric"]
+                value = float(series["value"][1])
+                if math.isfinite(value):
+                    key = (labels["namespace"], labels["pod"])
+                    rates[key] = rates.get(key, 0.0) + value
+        except httpx.HTTPError, KeyError, TypeError, ValueError, IndexError:
             logger.warning(
-                "metrics.k8s.io unavailable in namespace %s (metrics-server not "
-                "installed, or RBAC lacks read access) - reporting 0 usage",
-                target.namespace,
+                "prometheus request-rate query failed; its series need namespace "
+                "and pod labels"
             )
-            return 0.0, 0.0
-        except Urllib3HTTPError as exc:
-            _raise_unavailable(
-                f"pod metrics for {target.namespace}/{target.deployment} unreachable",
-                exc,
-            )
-
-        try:
-            usage_by_pod = {
-                item["metadata"]["name"]: item["containers"]
-                for item in metrics.get("items", [])
-            }
-            cpu_used_millicores = 0.0
-            memory_used_bytes = 0.0
-            for pod in pods:
-                for container_metrics in usage_by_pod.get(pod.metadata.name, []):
-                    usage = container_metrics["usage"]
-                    cpu_used_millicores += _parse_cpu_millicores(usage["cpu"])
-                    memory_used_bytes += _parse_quantity(usage["memory"])
-            cpu_requested_millicores = _cpu_request_millicores(pods)
-        except (KeyError, TypeError, ValueError) as exc:
-            raise KubernetesUnavailableError(
-                f"malformed pod metrics for {target.namespace}/{target.deployment}: "
-                f"{exc!r}"
-            ) from exc
-
-        cpu_usage_pct = (
-            min(100.0, cpu_used_millicores / cpu_requested_millicores * 100)
-            if cpu_requested_millicores
-            else 0.0
-        )
-        memory_usage_mb = memory_used_bytes / (1024 * 1024)
-        return round(cpu_usage_pct, 2), round(memory_usage_mb, 2)
+            return None
+        return rates

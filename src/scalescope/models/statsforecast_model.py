@@ -17,6 +17,10 @@ from scalescope.models.seasonality import detect_period
 logger = logging.getLogger(__name__)
 
 _MIN_HISTORY = 30
+# StatsForecast's ETS skips every seasonal model when season_length > 24
+# (statsforecast/ets.py), after spending seconds trying them; passing 1
+# gives the same fit ~100x faster and says what actually happens.
+_MAX_ETS_SEASON_LENGTH = 24
 
 
 class AutoEtsModel:
@@ -39,7 +43,8 @@ class AutoEtsModel:
         )
 
         try:
-            season_length = detect_period(history)
+            period = detect_period(history)
+            season_length = period if period <= _MAX_ETS_SEASON_LENGTH else 1
             sf = StatsForecast(
                 models=[AutoETS(season_length=season_length)], freq=1, n_jobs=1
             )

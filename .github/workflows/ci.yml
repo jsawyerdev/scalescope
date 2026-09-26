@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      # The lock file pins the exact resolution rebuild.sh last validated.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-lock.txt
+          pip install --no-deps -e .
+      - name: Format
+        run: black --check src tests sample-workload/app scripts/tune
+      - name: Lint
+        run: ruff check .
+      - name: Type check
+        run: mypy
+      - name: Test
+        run: pytest -q
+      - name: Shell scripts
+        run: shellcheck scripts/*.sh scripts/tune/*.sh sample-workload/scripts/*.sh
+      - name: Dashboard script
+        run: node --check src/scalescope/static/app.js

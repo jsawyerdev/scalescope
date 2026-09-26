@@ -18,6 +18,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 CAPACITY_PER_POD_RPS = 220.0
+# One pod at 100% of this CPU request serves CAPACITY_PER_POD_RPS.
+CPU_REQUEST_MILLICORES = 1000.0
 TARGET_CPU_UTILIZATION = 0.60
 MIN_REPLICAS = 3
 MAX_REPLICAS = 30
@@ -163,6 +165,11 @@ class WorkloadSimulator:
             "ts": datetime.now(UTC),
             "workload": self.state.name,
             "replicas": current_replicas,
+            "desired_replicas": new_replicas,
+            "cpu_usage_millicores": round(
+                cpu_usage_pct / 100 * CPU_REQUEST_MILLICORES * current_replicas, 1
+            ),
+            "cpu_request_millicores": CPU_REQUEST_MILLICORES,
             "request_rate": round(demand, 2),
             "cpu_usage_pct": round(cpu_usage_pct, 2),
             "cpu_throttled_pct": round(cpu_throttled_pct, 2),

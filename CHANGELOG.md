@@ -4,7 +4,55 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
-## [Unreleased]
+## [0.12.0]
+
+### Added
+
+- Deploy to any cluster: `kubectl apply -k k8s/scalescope` installs the
+  published multi-arch (amd64/arm64) `ghcr.io/jsawyerdev/scalescope` image;
+  `.github/workflows/image.yml` publishes it and the sample workload image,
+  and `.github/workflows/ci.yml` runs format, lint, type, test, shellcheck
+  and script checks on every pull request.
+- Workloads without request metrics are forecast on their **total CPU**
+  (metrics-server) and sized against their pods' CPU request, so every
+  Deployment gets a recommendation with no Prometheus and no
+  instrumentation. Responses report `demand_signal`.
+- Optional per-pod request rates from one Prometheus instant query per tick
+  (`SCALESCOPE_PROMETHEUS_URL`, `SCALESCOPE_PROMETHEUS_RPS_QUERY`), attributed
+  to Deployments through their label selectors.
+- Per-pod capacity is configured (`SCALESCOPE_CAPACITY_PER_POD_RPS`),
+  estimated per workload from request-rate and CPU history, or the CPU
+  request; responses report `capacity_per_pod` and `capacity_source`, and an
+  unknown capacity holds replicas instead of guessing.
+- `SCALESCOPE_MIN_REPLICAS`, `SCALESCOPE_MAX_REPLICAS`,
+  `SCALESCOPE_TARGET_UTILIZATION`, `SCALESCOPE_RETENTION_HOURS`, and
+  `SCALESCOPE_SCALE_DOWN_STABILIZATION_SECONDS` (actuation, default 0).
+- The replay lab scores the p90 forecast that sizes replicas (pinball loss
+  and coverage), ranks models by it, and backtests 10 anchors instead of 5.
+
+### Changed
+
+- Scaling is asymmetric: scale up for the p90 peak within the pod startup
+  lead, scale down only when the whole horizon's p90 fits in fewer pods.
+  Offline on DEMO demand this cut scale-direction reversals 5-7x for about
+  2% more pods (see README "Scaling policy").
+- Recommendations and actuation plan from `spec.replicas`; `status.replicas`
+  lags a scale write and made actuation repeat a step instead of taking the
+  next one.
+- Collection lists Pods and PodMetrics once per namespace instead of three
+  API calls per Deployment.
+- Observations are pruned after 24 hours by default; the forecast cache is
+  a bounded LRU; store writes run off the event loop.
+- The default minimum replica count is 1 (was a fixed 3), and the simulator's
+  220 req/s per pod is no longer used to size real workloads.
+- Manifests use the published images instead of a private registry.
+
+### Fixed
+
+- `auto_ets` no longer passes seasonal periods over 24 to StatsForecast's
+  ETS, which silently skips every seasonal model above 24 after trying them:
+  identical forecasts, about 100x faster (a full recommendation went from
+  ~4.5s to ~0.5s).
 
 ### Fixed
 

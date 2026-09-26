@@ -25,8 +25,9 @@ spec:
           type: RuntimeDefault
       containers:
         - name: scalescope
-          image: 192.168.1.202:5000/scalescope:0.11.1
-          imagePullPolicy: Always
+          # Published by .github/workflows/image.yml (amd64 and arm64).
+          image: ghcr.io/jsawyerdev/scalescope:0.12.0
+          imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -42,14 +43,21 @@ spec:
               value: "5.0"
             - name: SCALESCOPE_DB_PATH
               value: /data/scalescope.duckdb
-            - name: SCALESCOPE_K8S_NAMESPACE
-              value: scalescope-demo
-            - name: SCALESCOPE_K8S_DEPLOYMENT
-              value: sample-workload
+            # Every Deployment the ServiceAccount can read. Demand is each
+            # workload's total CPU (metrics-server) unless request rates
+            # are available; see README "Deploy to any cluster".
             - name: SCALESCOPE_K8S_NAMESPACES
               value: "*"
-            - name: SCALESCOPE_K8S_METRICS_URL
-              value: http://sample-workload.scalescope-demo.svc.cluster.local/metrics
+            # Optional per-pod request rates, e.g.
+            # http://prometheus-server.monitoring.svc:9090
+            # - name: SCALESCOPE_PROMETHEUS_URL
+            #   value: ""
+            # Actuation writes replicas for one Deployment; set both of these
+            # to it and apply k8s/scalescope-actuation/ before enabling.
+            # - name: SCALESCOPE_K8S_NAMESPACE
+            #   value: my-namespace
+            # - name: SCALESCOPE_K8S_DEPLOYMENT
+            #   value: my-deployment
             - name: SCALESCOPE_ACTUATE
               value: "false"
             - name: SCALESCOPE_LOG_LEVEL

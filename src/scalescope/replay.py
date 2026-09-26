@@ -4,6 +4,10 @@ Answers "which model actually performs best on this workload's data" with
 measured error, not a stated preference. Picks several evenly spaced past
 anchor points, forecasts forward from each using only the data available at
 that point, and compares against what actually happened next.
+
+Replica sizing uses the p90 forecast, so each model is scored on it too:
+pinball (quantile) loss at 0.9, and coverage, the share of actual values at
+or below p90 (0.9 for a calibrated forecast; lower means under-provisioning).
 """
 
 from __future__ import annotations
@@ -14,7 +18,8 @@ import numpy as np
 
 from scalescope.models.base import ForecastModel
 
-DEFAULT_NUM_ANCHORS = 5
+DEFAULT_NUM_ANCHORS = 10
+_P90 = 0.9
 # Shared by the replay API and scripts/tune so the tuner optimizes exactly
 # the score the dashboard's replay lab reports.
 REPLAY_MAX_OBSERVATIONS = 5000
@@ -32,6 +37,13 @@ class ReplayScore:
     n_anchors: int
     mean_absolute_error: float
     mean_absolute_pct_error: float
+    p90_pinball_loss: float
+    p90_coverage: float
+
+
+def _pinball_loss(actual: np.ndarray, predicted: np.ndarray, quantile: float) -> float:
+    residual = actual - predicted
+    return float(np.mean(np.maximum(quantile * residual, (quantile - 1) * residual)))
 
 
 def _anchors(
@@ -55,7 +67,7 @@ def replay_score(
     """Backtest every model in `models` over up to `num_anchors` points in `history`.
 
     Each anchor trains only on data strictly before it and compares the
-    forecast's p50 against the real values that actually followed. Returns
+    forecast's p50 and p90 against the real values that followed. Returns
     an empty list when `history` is too short for any anchor; a model whose
     forecasts are empty at every anchor is omitted rather than scored.
     """
@@ -67,14 +79,17 @@ def replay_score(
     for name, model in models.items():
         errors: list[float] = []
         pct_errors: list[float] = []
+        pinball: list[float] = []
+        covered: list[float] = []
         for anchor in anchors:
             train = history[:anchor]
-            actual = history[anchor : anchor + horizon]
             forecast = model.predict(train, horizon)
-            predicted = forecast.p50[: len(actual)]
-            actual = actual[: len(predicted)]
-            if len(actual) == 0:
+            steps = min(horizon, len(forecast.p50))
+            if steps == 0:
                 continue
+            actual = history[anchor : anchor + steps]
+            predicted = forecast.p50[:steps]
+            upper = forecast.p90[:steps]
             errors.append(float(np.mean(np.abs(actual - predicted))))
             pct_errors.append(
                 float(
@@ -82,6 +97,8 @@ def replay_score(
                     * 100
                 )
             )
+            pinball.append(_pinball_loss(actual, upper, _P90))
+            covered.append(float(np.mean(actual <= upper)))
         if not errors:
             continue
         results.append(
@@ -90,6 +107,8 @@ def replay_score(
                 n_anchors=len(errors),
                 mean_absolute_error=round(float(np.mean(errors)), 2),
                 mean_absolute_pct_error=round(float(np.mean(pct_errors)), 2),
+                p90_pinball_loss=round(float(np.mean(pinball)), 2),
+                p90_coverage=round(float(np.mean(covered)), 3),
             )
         )
     return results

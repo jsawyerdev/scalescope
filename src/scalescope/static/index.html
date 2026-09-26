@@ -169,16 +169,20 @@
         <span class="label">Pod Load</span>
         <span class="value" id="forecast-pod-load">-</span>
       </div>
+      <div class="detail-item">
+        <span class="label hint" title="Demand one pod serves at 100% of its CPU request: configured, estimated from this workload's history, or its CPU request when forecasting CPU. Unknown means replicas are held, not guessed.">Pod Capacity</span>
+        <span class="value" id="forecast-pod-capacity">-</span>
+      </div>
     </div>
     <div class="table-wrap">
       <table id="forecast-ramp-table">
         <thead>
           <tr>
             <th class="hint" title="Elapsed time from the latest observation.">Horizon</th>
-            <th class="num hint" title="Lower forecast band for request rate.">P10 Req/s</th>
-            <th class="num hint" title="Median forecast for request rate.">P50 Req/s</th>
-            <th class="num hint" title="Upper forecast band used for capacity sizing.">P90 Req/s</th>
-            <th class="num hint" title="P90 change compared with the latest observed request rate.">P90 Delta</th>
+            <th class="num hint" title="Lower forecast band for the demand signal.">P10</th>
+            <th class="num hint" title="Median forecast for the demand signal.">P50</th>
+            <th class="num hint" title="Upper forecast band used for capacity sizing.">P90</th>
+            <th class="num hint" title="P90 change compared with the latest observed demand.">P90 Delta</th>
           </tr>
         </thead>
         <tbody id="forecast-ramp-body"></tbody>
@@ -199,7 +203,7 @@
             <th class="num hint" title="Replica count sized from this model's p90 demand forecast at 70% target utilization.">Replicas</th>
             <th class="num hint" title="Change from the currently observed replica count.">Delta</th>
             <th class="hint" title="Derived from forecast band width relative to peak demand.">Confidence</th>
-            <th class="num hint" title="Highest predicted request rate in the lookahead window at p90.">P90 Req/s</th>
+            <th class="num hint" title="Highest p90 demand over the forecast horizon, in the demand signal's unit.">P90 Peak</th>
             <th class="num hint" title="Expected percent of per-pod capacity at the recommended replica count.">Pod Load</th>
           </tr>
         </thead>
@@ -218,10 +222,12 @@
       <table id="replay-table">
         <thead>
           <tr>
-            <th class="hint" title="Sorted best-first by mean absolute error.">Model</th>
+            <th class="hint" title="Sorted best-first by p90 pinball loss, since replicas are sized from the p90 forecast.">Model</th>
             <th class="num hint" title="Number of past points backtested.">Anchors</th>
             <th class="num hint" title="Average absolute difference between actual and forecast values. Lower is better.">MAE</th>
             <th class="num hint" title="Mean absolute percentage error. Lower is better.">MAPE</th>
+            <th class="num hint" title="Quantile (pinball) loss of the p90 forecast, which sizes replicas. Lower is better.">P90 Loss</th>
+            <th class="num hint" title="Share of actual values at or below the p90 forecast. 90% is calibrated; lower means under-provisioning, higher means over-provisioning.">P90 Cover</th>
           </tr>
         </thead>
         <tbody id="replay-table-body"></tbody>
@@ -233,7 +239,7 @@
   <section class="panel chart-panel">
     <div class="panel-header">
       <h2>Forecast - <span id="chart-model-name">-</span></h2>
-      <span class="panel-note">observed demand plus selected forecast band</span>
+      <span class="panel-note" id="demand-note">observed demand plus selected forecast band</span>
     </div>
     <div class="chart-wrap"><canvas id="request-rate-chart"></canvas></div>
   </section>

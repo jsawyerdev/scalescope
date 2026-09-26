@@ -14,11 +14,13 @@ import polars as pl
 from fastapi import APIRouter, HTTPException, Query
 
 from scalescope.capacity import (
-    CAPACITY_PER_POD_RPS,
     STARTUP_LEAD_STEPS,
+    CapacityRecommendation,
     recommend_replicas,
+    resolve_capacity,
 )
 from scalescope.config import settings
+from scalescope.demand import DemandSignal, demand_history, demand_signal
 from scalescope.diagnosis import DIAGNOSIS_WINDOW_STEPS, DiagnosisResult, diagnose
 from scalescope.k8s_collector import workload_id
 from scalescope.models.base import Forecast, ForecastModel
@@ -89,11 +91,14 @@ _MAX_OBSERVATIONS_LIMIT = 5000
 _SOURCE_STALE_AFTER_SECONDS = max(30.0, settings.simulation_tick_seconds * 5)
 _VERSION = _package_version("scalescope")
 
-# Keyed by (workload, model) -> (latest observation ts, Forecast). A fixed-size
-# history window keeps len(history) constant once it fills, so the cache must
-# key on the newest timestamp rather than row count to invalidate correctly.
+# Keyed by (workload, model, signal) -> (latest observation ts, Forecast). A
+# fixed-size history window keeps len(history) constant once it fills, so the
+# cache must key on the newest timestamp rather than row count to invalidate.
+# Bounded LRU: workloads come and go (Deployment churn, retention), and an
+# unbounded dict would keep every one ever seen for the process lifetime.
+_FORECAST_CACHE_MAX_ENTRIES = 2048
 _forecast_cache_lock = threading.Lock()
-_forecast_cache: dict[tuple[str, str], tuple[Any, Forecast]] = {}
+_forecast_cache: dict[tuple[str, str, DemandSignal], tuple[Any, Forecast]] = {}
 
 
 def get_store() -> Store:
@@ -123,25 +128,30 @@ def get_source() -> dict[str, Any]:
 
 
 def _recent_observations_or_404(workload: str, limit: int) -> pl.DataFrame:
-    # A workload only exists once it has an observation (the store never
-    # deletes rows), so an empty result is exactly an unknown workload.
+    # A workload exists exactly while it has observations (retention prunes
+    # whole time ranges), so an empty result is exactly an unknown workload.
     df = get_store().recent_observations(workload, limit)
     if df.is_empty():
         raise HTTPException(status_code=404, detail=f"unknown workload: {workload}")
     return df
 
 
-def _get_forecast(workload: str, model: str, df: pl.DataFrame) -> Forecast:
-    history = df["request_rate"].to_numpy()
+def _get_forecast(
+    workload: str, model: str, df: pl.DataFrame, signal: DemandSignal
+) -> Forecast:
+    history = demand_history(df, signal)
     latest_ts = df["ts"][-1]
-    cache_key = (workload, model)
+    cache_key = (workload, model, signal)
     with _forecast_cache_lock:
         cached = _forecast_cache.get(cache_key)
         if cached is not None and cached[0] == latest_ts:
             return cached[1]
     forecast = _MODELS[model].predict(history, _HORIZON_STEPS)
     with _forecast_cache_lock:
+        _forecast_cache.pop(cache_key, None)
         _forecast_cache[cache_key] = (latest_ts, forecast)
+        while len(_forecast_cache) > _FORECAST_CACHE_MAX_ENTRIES:
+            del _forecast_cache[next(iter(_forecast_cache))]
     return forecast
 
 
@@ -172,10 +182,12 @@ def get_forecast(workload: str, model: str = _DEFAULT_MODEL) -> dict[str, Any]:
     if model not in _MODELS:
         raise HTTPException(status_code=400, detail=f"unknown model: {model}")
     df = _recent_observations_or_404(workload, _HISTORY_STEPS)
-    forecast = _get_forecast(workload, model, df)
+    signal = demand_signal(df)
+    forecast = _get_forecast(workload, model, df, signal)
     return {
         "workload": workload,
         "model": forecast.model_name,
+        "demand_signal": signal,
         "horizon_steps": _HORIZON_STEPS,
         "p10": forecast.p10.tolist(),
         "p50": forecast.p50.tolist(),
@@ -185,7 +197,7 @@ def get_forecast(workload: str, model: str = _DEFAULT_MODEL) -> dict[str, Any]:
 
 @router.get("/workloads/{workload}/diagnosis")
 def get_diagnosis(workload: str) -> dict[str, Any]:
-    result = diagnose(_recent_observations_or_404(workload, DIAGNOSIS_WINDOW_STEPS))
+    result = _diagnose(_recent_observations_or_404(workload, DIAGNOSIS_WINDOW_STEPS))
     return {
         "workload": workload,
         "diagnosis": result.diagnosis.value,
@@ -194,29 +206,34 @@ def get_diagnosis(workload: str) -> dict[str, Any]:
     }
 
 
+def _diagnose(df: pl.DataFrame) -> DiagnosisResult:
+    return diagnose(df, max_replicas=settings.max_replicas)
+
+
 def _compute_recommendation(
     workload: str, model: str, df: pl.DataFrame, diag: DiagnosisResult
 ) -> dict[str, Any]:
-    current_replicas = int(df["replicas"][-1])
-    forecast = _get_forecast(workload, model, df)
-    rec = recommend_replicas(current_replicas, forecast, peak_step=STARTUP_LEAD_STEPS)
-    recommended_replicas = (
-        rec.recommended_replicas if diag.scaling_will_help else current_replicas
+    signal = demand_signal(df)
+    rec: CapacityRecommendation = recommend_replicas(
+        # spec.replicas, not status: status lags a scale write by many seconds.
+        int(df["desired_replicas"][-1]),
+        _get_forecast(workload, model, df, signal),
+        resolve_capacity(df, signal, settings.capacity_per_pod_rps),
+        settings.scaling_policy,
+        peak_step=STARTUP_LEAD_STEPS,
+        scaling_will_help=diag.scaling_will_help,
     )
-    projected_utilization = (
-        rec.peak_forecast_p90 / (recommended_replicas * CAPACITY_PER_POD_RPS)
-        if recommended_replicas
-        else 0.0
-    )
-
     return {
         "workload": workload,
         "model": model,
         "current_replicas": rec.current_replicas,
-        "recommended_replicas": recommended_replicas,
+        "recommended_replicas": rec.recommended_replicas,
         "peak_forecast_p90": rec.peak_forecast_p90,
-        "projected_utilization": projected_utilization,
+        "projected_utilization": rec.projected_utilization,
         "confidence": rec.confidence,
+        "demand_signal": signal,
+        "capacity_per_pod": rec.capacity.per_pod,
+        "capacity_source": rec.capacity.source,
         "scaling_will_help": diag.scaling_will_help,
         "diagnosis": diag.diagnosis.value,
         "explanation": diag.explanation,
@@ -228,14 +245,14 @@ def get_recommendation(workload: str, model: str = _DEFAULT_MODEL) -> dict[str, 
     if model not in _MODELS:
         raise HTTPException(status_code=400, detail=f"unknown model: {model}")
     df = _recent_observations_or_404(workload, _HISTORY_STEPS)
-    return _compute_recommendation(workload, model, df, diagnose(df))
+    return _compute_recommendation(workload, model, df, _diagnose(df))
 
 
 @router.get("/workloads/{workload}/recommendations")
 def get_all_recommendations(workload: str) -> dict[str, Any]:
     """Recommendation from every registered model, for side-by-side comparison."""
     df = _recent_observations_or_404(workload, _HISTORY_STEPS)
-    diag = diagnose(df)
+    diag = _diagnose(df)
     return {
         "workload": workload,
         "diagnosis": diag.diagnosis.value,
@@ -258,13 +275,15 @@ def get_replay(workload: str) -> dict[str, Any]:
     scaling decisions.
     """
     df = _recent_observations_or_404(workload, REPLAY_MAX_OBSERVATIONS)
-    history = df["request_rate"].to_numpy()
+    signal = demand_signal(df)
+    history = demand_history(df, signal)
     scores = replay_score(
         history, _MODELS, min_history=REPLAY_MIN_HISTORY, horizon=_HORIZON_STEPS
     )
     return {
         "workload": workload,
         "n_observations": len(history),
+        "demand_signal": signal,
         "horizon_steps": _HORIZON_STEPS,
         "scores": sorted(
             (
@@ -273,10 +292,13 @@ def get_replay(workload: str) -> dict[str, Any]:
                     "n_anchors": s.n_anchors,
                     "mean_absolute_error": s.mean_absolute_error,
                     "mean_absolute_pct_error": s.mean_absolute_pct_error,
+                    "p90_pinball_loss": s.p90_pinball_loss,
+                    "p90_coverage": s.p90_coverage,
                 }
                 for s in scores
             ),
-            key=lambda s: s["mean_absolute_error"],
+            # p90 drives replica sizing, so rank on how well it is forecast.
+            key=lambda s: s["p90_pinball_loss"],
         ),
     }
 
