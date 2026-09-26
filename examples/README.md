@@ -1,160 +1,240 @@
-# ScaleScope Deployment Examples
+# Deploying ScaleScope
 
-ScaleScope is advisory by default. It becomes an autoscaler only when OBSERVE
-mode, write RBAC, and `SCALESCOPE_ACTUATE=true` are all enabled.
+ScaleScope is **advisory by default**: it reads the cluster and recommends pod
+counts. It changes a Deployment only when you turn on actuation (step 5).
 
-## 1. Local advisory demo
+- [1. Before you start](#1-before-you-start)
+- [2. Install](#2-install)
+- [3. Open the dashboard](#3-open-the-dashboard)
+- [4. Configure](#4-configure)
+- [5. Turn on autoscaling](#5-turn-on-autoscaling-optional)
+- [6. Expose the dashboard safely](#6-expose-the-dashboard-safely)
+- [7. Try it with the sample workload](#7-try-it-with-the-sample-workload)
+- [8. Run it locally instead](#8-run-it-locally-instead)
+- [9. Upgrade and uninstall](#9-upgrade-and-uninstall)
+- [10. Troubleshooting](#10-troubleshooting)
 
-No cluster required.
+## 1. Before you start
+
+- `kubectl` 1.27 or newer (for `apply -k` with remote sources), with a
+  context that may create a namespace and cluster-wide RBAC.
+- **metrics-server** in the cluster. Most managed clusters ship it; check with:
+
+  ```sh
+  kubectl top pods -A | head
+  ```
+
+- **CPU requests** on the Deployments you want recommendations for. Without
+  a request rate from Prometheus or the workload itself, ScaleScope sizes
+  pods against their CPU request.
+- The images are public, multi-arch (amd64/arm64), and need no pull secret:
+  `ghcr.io/jsawyerdev/scalescope` and `ghcr.io/jsawyerdev/scalescope-sample-workload`.
+
+## 2. Install
+
+Straight from GitHub, no clone needed:
 
 ```sh
-./scripts/rebuild.sh
-curl -fs http://localhost:8000/healthz
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.13.0"
+kubectl -n scalescope-system rollout status deployment/scalescope
+```
+
+Or from a clone: `kubectl apply -k k8s/scalescope`.
+
+This creates the `scalescope-system` namespace, a ServiceAccount with
+**read-only** cluster-wide access to Deployments, Pods, and pod metrics, a
+1Gi volume for history, the Deployment (one replica), and a `ClusterIP`
+Service. It observes every Deployment the ServiceAccount can read.
+
+## 3. Open the dashboard
+
+```sh
+kubectl -n scalescope-system port-forward svc/scalescope 8000:80
+```
+
+Open http://localhost:8000 and pick a workload. From the top:
+
+1. **Status**: green means the current pods cover the forecast, amber means a
+   change is recommended or data is slow, red means data stopped or adding
+   pods would not fix the problem.
+2. **Recommendation**: what the autoscaler would do ("Add 1 pod now: 4 → 5"),
+   why, and the numbers behind it. It stays advisory until step 5.
+3. **Demand forecast and pods**: recent demand, the forecast, and pods
+   running vs needed.
+
+Give each workload a few minutes of history. When demand is a request rate,
+ScaleScope first measures how much one pod handles (at least ten
+observations with traffic and moderate CPU); until then it holds the current
+pod count and says so. Workloads sized by CPU use the CPU request at once.
+
+Check the connection from the command line:
+
+```sh
 curl -fs http://localhost:8000/api/source
 curl -fs http://localhost:8000/api/workloads
-curl -fs "http://localhost:8000/api/workloads/sample-app/recommendations"
 ```
 
-Open http://localhost:8000. The dashboard should show `DEMO`, `no cluster`,
-forecast bands, recommendations, diagnosis, and replay results.
+`/api/source` should show `"mode": "observe"` and `"connected": true`.
+Workload IDs are `namespace:deployment`.
 
-## 2. Local OBSERVE advisory mode
+## 4. Configure
 
-This runs ScaleScope in Docker while it reads a real Kubernetes cluster through
-a generated kubeconfig. It does not write replica counts unless
-`SCALESCOPE_ACTUATE=true`.
+Change settings with `kubectl set env`; the pod restarts with them.
 
 ```sh
-kubectl apply -f sample-workload/k8s/
-kubectl apply -f k8s/rbac/
-OUTPUT_PATH=./scalescope-observer.kubeconfig ./scripts/generate-observer-kubeconfig.sh
-kubectl -n scalescope-demo port-forward svc/sample-workload 18080:80
+kubectl -n scalescope-system set env deployment/scalescope \
+  SCALESCOPE_PROMETHEUS_URL=http://prometheus-server.monitoring.svc:9090
 ```
 
-Use these `.env` values for the observe service:
+| Setting | What it does |
+|---|---|
+| `SCALESCOPE_PROMETHEUS_URL` | Use per-pod request rates as demand (sharper than CPU). The query in `SCALESCOPE_PROMETHEUS_RPS_QUERY` must return series labelled `namespace` and `pod`; the default is `sum by (namespace, pod) (rate(http_requests_total[2m]))`. |
+| `SCALESCOPE_CAPACITY_PER_POD_RPS` | Requests/s one pod serves at 100% of its CPU request, from a load test. Unset, it is measured per workload. |
+| `SCALESCOPE_MIN_REPLICAS`, `SCALESCOPE_MAX_REPLICAS` | Bounds on every recommendation (default 1 and 30). |
+| `SCALESCOPE_TARGET_UTILIZATION` | How full each pod may run (default 0.70). |
+| `SCALESCOPE_K8S_NAMESPACES` | Comma-separated namespaces to observe; `*` (the default in the manifest) means all readable ones. |
+
+The full list is in the main README's "Run it" table.
+
+**Narrower visibility.** To limit ScaleScope to some namespaces, replace the
+cluster-wide binding with one RoleBinding per namespace:
 
 ```sh
-SCALESCOPE_K8S_NAMESPACE=scalescope-demo
-SCALESCOPE_K8S_DEPLOYMENT=sample-workload
-SCALESCOPE_K8S_NAMESPACES=scalescope-demo
-SCALESCOPE_OBSERVER_KUBECONFIG=./scalescope-observer.kubeconfig
-SCALESCOPE_K8S_METRICS_URL=http://host.docker.internal:18080/metrics
-SCALESCOPE_ACTUATE=false
+kubectl delete clusterrolebinding scalescope-observer
+# once per namespace: edit metadata.namespace in the file first
+kubectl apply -f examples/k8s/observe-namespace-rolebinding.yaml
+kubectl -n scalescope-system set env deployment/scalescope \
+  SCALESCOPE_K8S_NAMESPACES=payments,checkout
 ```
 
-Then rebuild both local services:
+## 5. Turn on autoscaling (optional)
+
+Actuation writes the recommended pod count for **one** Deployment, only when
+the diagnosis says more pods would help, and never while a
+HorizontalPodAutoscaler manages the same Deployment.
 
 ```sh
-./scripts/rebuild.sh --observe
-curl -fs http://localhost:8001/api/source
-curl -fs http://localhost:8001/api/workloads
-```
-
-The `/api/source` response should show `mode: observe`, `connected: true`, the
-cluster server, the auth identity, and `actuate: false`.
-
-## 3. In-cluster advisory mode
-
-Build an image your cluster can pull, update
-`k8s/scalescope/deployment.yaml`, then deploy:
-
-```sh
-docker buildx build --platform linux/amd64 \
-  -t <your-registry>/scalescope:0.13.0 \
-  --push .
-
-kubectl apply -f k8s/scalescope/
-kubectl -n scalescope-system rollout status deployment/scalescope
-kubectl -n scalescope-system port-forward svc/scalescope 8000:80
-curl -fs http://localhost:8000/api/source
-```
-
-The checked-in `k8s/scalescope/clusterrolebinding-observer.yaml` grants
-cluster-wide read visibility to the ScaleScope ServiceAccount. That is useful
-for an operator demo or platform-wide install. For a narrower production
-install, do not apply that ClusterRoleBinding; instead apply
-`examples/k8s/observe-namespace-rolebinding.yaml` once per namespace that
-users are allowed to inspect, and set `SCALESCOPE_K8S_NAMESPACES` to that same
-comma-separated namespace list.
-
-## 4. In-cluster actuation mode
-
-Actuation is the autoscaling option. It patches only the
-`deployments/scale` subresource for the configured primary target, and refuses
-to write if a HorizontalPodAutoscaler already targets the same Deployment.
-
-```sh
+# write access to deployments/scale (cluster-wide; see below to narrow it)
 kubectl apply -f k8s/scalescope-actuation/
-kubectl -n scalescope-system set env deployment/scalescope SCALESCOPE_ACTUATE=true
+
+# a competing HPA blocks actuation; remove it if there is one
+kubectl -n my-namespace get hpa
+
+kubectl -n scalescope-system set env deployment/scalescope \
+  SCALESCOPE_K8S_NAMESPACE=my-namespace \
+  SCALESCOPE_K8S_DEPLOYMENT=my-deployment \
+  SCALESCOPE_ACTUATE=true
 kubectl -n scalescope-system rollout status deployment/scalescope
 ```
 
-For namespace-limited actuation, do not apply
-`k8s/scalescope-actuation/clusterrolebinding-actuator.yaml`; bind the
-`scalescope-actuator` ClusterRole in only the target namespace instead:
+The top bar then shows **Autoscaling** with the last change or the reason it
+was skipped, and the recommendation footnote says "Autoscaling is on".
 
-```sh
-kubectl apply -f k8s/scalescope-actuation/clusterrole-actuator.yaml
-kubectl apply -f examples/k8s/actuation-namespace-rolebinding.yaml
-kubectl -n scalescope-system set env deployment/scalescope SCALESCOPE_ACTUATE=true
-```
+To grant write access in one namespace only, apply
+`k8s/scalescope-actuation/clusterrole-actuator.yaml` and
+`examples/k8s/actuation-namespace-rolebinding.yaml` (edit its namespace)
+instead of the whole `k8s/scalescope-actuation/` directory.
 
-If the sample workload HPA is installed, remove it before actuation:
-
-```sh
-kubectl delete hpa sample-workload -n scalescope-demo
-```
-
-Verify the write boundary before trusting the deployment:
+Verify the write boundary:
 
 ```sh
 kubectl auth can-i patch deployments/scale \
-  --as=system:serviceaccount:scalescope-system:scalescope \
-  -n scalescope-demo
-
+  --as=system:serviceaccount:scalescope-system:scalescope -n my-namespace   # yes
 kubectl auth can-i delete pods \
-  --as=system:serviceaccount:scalescope-system:scalescope \
-  -n scalescope-demo
+  --as=system:serviceaccount:scalescope-system:scalescope -n my-namespace   # no
 ```
 
-The first command should be `yes` only where actuation is intended. The second
-command should be `no`.
+Optional: `SCALESCOPE_SCALE_DOWN_STABILIZATION_SECONDS=300` holds
+scale-downs like the Kubernetes HPA does. It is off by default because the
+forecast already refuses to remove pods it will need again soon; see the
+main README's "Scaling policy" for the measurements.
 
-## 5. Exposed dashboard with Basic Auth
+## 6. Expose the dashboard safely
 
-The in-cluster Service is `ClusterIP`; keep it internal unless an ingress,
-gateway, VPN, SSO proxy, mTLS policy, or equivalent control protects it.
-
-For built-in Basic Auth:
+The Service is `ClusterIP`. Before exposing it through an ingress or load
+balancer, turn on Basic Auth (or put it behind your SSO/VPN):
 
 ```sh
 kubectl -n scalescope-system create secret generic scalescope-auth \
   --from-literal=username="$SCALESCOPE_AUTH_USERNAME" \
   --from-literal=password="$SCALESCOPE_AUTH_PASSWORD"
-
 kubectl -n scalescope-system rollout restart deployment/scalescope
-kubectl -n scalescope-system rollout status deployment/scalescope
 ```
 
-Then verify through the exposed route or port-forward:
+Every page and API route then asks for the credentials, except `/healthz`.
+
+## 7. Try it with the sample workload
+
+`sample-workload/` is a small app that generates its own varying load and
+exposes request-rate, latency, and error metrics, so you can watch every
+part of ScaleScope work.
 
 ```sh
-curl -fs -u "$SCALESCOPE_AUTH_USERNAME:$SCALESCOPE_AUTH_PASSWORD" \
-  http://localhost:8000/api/source
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//sample-workload/k8s?ref=v0.13.0"
+
+# give ScaleScope the sample's own metrics (request rate, latency, errors)
+kubectl -n scalescope-system set env deployment/scalescope \
+  SCALESCOPE_K8S_NAMESPACE=scalescope-demo \
+  SCALESCOPE_K8S_DEPLOYMENT=sample-workload \
+  SCALESCOPE_K8S_METRICS_URL=http://sample-workload.scalescope-demo.svc.cluster.local/metrics
 ```
 
-## 6. Sustained spike demo
+Select `scalescope-demo/sample-workload` in the dashboard and use **Try it**
+("Spike traffic", "Stress CPU") to force a load pattern: the recommendation
+should turn to "Add N pods" within a few ticks and back once it ends.
 
-Deploy `sample-workload/`, expose its Service to ScaleScope through
-`SCALESCOPE_K8S_METRICS_URL`, then use the dashboard's load buttons or call:
+The sample installs its own HPA as a baseline to compare against. Delete it
+(`kubectl -n scalescope-demo delete hpa sample-workload`) before turning on
+actuation for it.
+
+## 8. Run it locally instead
+
+**Demo, no cluster:**
 
 ```sh
-curl -fs -X POST \
-  "http://localhost:8000/api/workloads/scalescope-demo:sample-workload/trigger?kind=traffic&duration_seconds=300"
-
-curl -fs -X POST \
-  "http://localhost:8000/api/workloads/scalescope-demo:sample-workload/trigger?kind=stress&duration_seconds=300"
+docker compose up --build
 ```
 
-The forecast ramp should show rising P50/P90 demand over time, projected pod
-load, recommended replicas, and whether diagnosis allows scaling.
+Open http://localhost:8000. A simulated workload (`sample-app`) starts
+producing data immediately.
+
+**Local Docker reading a real cluster** (a scoped kubeconfig instead of an
+in-cluster ServiceAccount):
+
+```sh
+kubectl apply -f k8s/rbac/
+OUTPUT_PATH=./scalescope-observer.kubeconfig ./scripts/generate-observer-kubeconfig.sh
+cp .env.example .env    # set SCALESCOPE_K8S_* for your cluster
+docker compose --profile observe up --build
+```
+
+The OBSERVE instance serves on http://localhost:8001. The generated
+kubeconfig holds a live token: keep it out of version control (it is
+already in `.gitignore`).
+
+## 9. Upgrade and uninstall
+
+Upgrade by applying a newer tag:
+
+```sh
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=vX.Y.Z"
+```
+
+Uninstall (this also deletes the namespace and its history volume):
+
+```sh
+kubectl delete -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.13.0"
+kubectl delete -f k8s/scalescope-actuation/ --ignore-not-found
+```
+
+## 10. Troubleshooting
+
+| You see | Cause and fix |
+|---|---|
+| Red status "Not receiving data from the cluster" | The ServiceAccount cannot list Deployments; check the ClusterRoleBinding (or RoleBindings) and `kubectl -n scalescope-system logs deploy/scalescope`. |
+| A workload is missing from the list | It is outside `SCALESCOPE_K8S_NAMESPACES` or the ServiceAccount's RBAC. |
+| "Hold at N pods: how much one pod can handle is not known yet" | No CPU request on the Deployment and no request-rate history to measure from. Add a CPU request, or set `SCALESCOPE_CAPACITY_PER_POD_RPS`. |
+| Demand stays at 0 | metrics-server is missing or cannot be read (logs say `metrics.k8s.io unavailable`); `kubectl top pods` must work. |
+| "Scaling will not fix this" | The diagnosis found a cause more pods would not solve (CPU throttling, a probable memory leak, pods stuck pending). The status line says which. |
+| Autoscaling shows "refusing to write" | A HorizontalPodAutoscaler targets the Deployment. Delete it or turn actuation off. |
+| `ImagePullBackOff` | The cluster cannot reach `ghcr.io`; mirror the image to a reachable registry and set it with a kustomize overlay (`kustomize edit set image ghcr.io/jsawyerdev/scalescope=<your-registry>/scalescope:0.13.0`). |

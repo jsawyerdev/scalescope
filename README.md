@@ -55,15 +55,16 @@ Requirements: metrics-server (most managed clusters ship it), and CPU
 requests on the Deployments you want recommendations for.
 
 ```
-kubectl apply -k k8s/scalescope
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.13.0"
 kubectl -n scalescope-system port-forward svc/scalescope 8000:80
 ```
 
 That installs the multi-arch (amd64/arm64) image
 `ghcr.io/jsawyerdev/scalescope`, published by `.github/workflows/image.yml`,
 with read-only cluster-wide RBAC, and observes every Deployment its
-ServiceAccount can read. To narrow the scope, see
-[examples/README.md](examples/README.md). Optional:
+ServiceAccount can read. **The step-by-step guide, including configuration,
+turning on autoscaling, exposing the dashboard, the sample workload, upgrades,
+and troubleshooting, is [examples/README.md](examples/README.md).** Optional:
 
 - `SCALESCOPE_PROMETHEUS_URL`: request rates from one instant query whose
   series carry `namespace` and `pod` labels (default
