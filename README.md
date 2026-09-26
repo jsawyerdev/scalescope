@@ -6,7 +6,7 @@ runs that alongside a deterministic diagnosis engine that flags when scaling is
 the wrong response (CPU limit throttling, memory leak, node capacity exhaustion,
 HPA ceiling, non-CPU bottleneck).
 
-## Status: v0.14.0 (sizes pods from each workload's own latency curve, a queueing model fitted from its history; replays scaling decisions against a reactive HPA; throttling, latency, and errors for every workload from Prometheus)
+## Status: v0.14.1 (sizes pods from each workload's own latency curve, a queueing model fitted from its history; replays scaling decisions against a reactive HPA; throttling, latency, and errors for every workload from Prometheus)
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed at each version.
 
@@ -57,7 +57,7 @@ Requirements: metrics-server (most managed clusters ship it), and CPU
 requests on the Deployments you want recommendations for.
 
 ```
-kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.14.0"
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.14.1"
 kubectl -n scalescope-system port-forward svc/scalescope 8000:80
 ```
 
@@ -116,7 +116,7 @@ recommendation holds the pod count](docs/screenshots/diagnosis-memory-leak.png)
 
 Clicking "Leak memory" forces the DEMO simulator's memory-leak fault; within a
 few ticks `diagnosis.py`'s rule engine (never a model) flags
-`POSSIBLE_MEMORY_LEAK`: memory is growing while traffic is flat, so adding
+`POSSIBLE_MEMORY_LEAK`: memory is growing while demand is flat, so adding
 pods would mask the leak, not fix it. The status turns red and the
 recommendation holds the pod count instead of asking for more.
 
@@ -388,9 +388,9 @@ flowchart TD
     THROTTLE -->|yes| R3["CPU_LIMIT_CONSTRAINT<br/>scaling_will_help = false<br/>containers hitting their CPU limit"]
     THROTTLE -->|no| WIN1{"last 30 rows<br/>&ge; 10 ?"}
 
-    WIN1 -->|yes| MEMCHECK{"memory slope &ge; 0.3 MB/tick<br/>AND traffic change &lt; 5% ?"}
+    WIN1 -->|yes| MEMCHECK{"memory slope &ge; 0.3 MB/tick<br/>AND demand change &lt; 5% ?"}
     WIN1 -->|no| CEILING
-    MEMCHECK -->|yes| R4["POSSIBLE_MEMORY_LEAK<br/>scaling_will_help = false<br/>memory grows while traffic is flat"]
+    MEMCHECK -->|yes| R4["POSSIBLE_MEMORY_LEAK<br/>scaling_will_help = false<br/>memory grows while demand is flat"]
     MEMCHECK -->|no| CEILING{"replicas &ge; max_replicas<br/>AND cpu_usage_pct &ge; 80% ?"}
 
     CEILING -->|yes| R5["HPA_CEILING<br/>scaling_will_help = false<br/>at the configured ceiling, still under pressure"]
@@ -564,7 +564,7 @@ Set both variables to enable HTTP Basic Auth
 static dashboard files as well as `/api/*`, not just the API):
 
 - `GET /healthz` is the one exempt route (unauthenticated liveness check;
-  the Docker `HEALTHCHECK` uses it).
+  the Docker `HEALTHCHECK` and the Kubernetes probes use it).
 - Browsers handle the login prompt natively — no dashboard login form was
   built. The first page load triggers the browser's built-in Basic Auth
   dialog; credentials are then cached by the browser and attached to every
@@ -618,6 +618,7 @@ sequenceDiagram
     Note over Browser,API: on button click only — not polled
     Browser->>API: POST /trigger?kind=...
     Browser->>API: GET /replay
+    Browser->>API: GET /scaling-replay
 ```
 
 ## Wiring in a real cluster (OBSERVE mode)
@@ -657,7 +658,7 @@ actuation RBAC:
 kubectl apply -f k8s/scalescope-actuation/
 ```
 
-For local Docker OBSERVE mode, `k8s/rbac/` still defines a namespace-scoped
+For local Docker OBSERVE mode, `k8s/rbac/` defines a namespace-scoped
 identity and standalone kubeconfig:
 
 1. `kubectl apply -f k8s/rbac/` — creates the `scalescope-demo` namespace, a
@@ -823,7 +824,9 @@ triggers require that variable to be set.
 ## API
 
 - `GET /healthz` — unauthenticated liveness check, the only exempt route
-  when Basic Auth is enabled (see "Authentication" above)
+  when Basic Auth is enabled (see "Authentication" above). Returns 503 once
+  the data-source loop has stopped (for example, the Kubernetes client could
+  not be created at startup), so the kubelet restarts the pod
 - `GET /api/workloads`
 - `GET /api/workloads/{name}/observations?limit=300`
 - `GET /api/workloads/{name}/forecast?model={naive|seasonal_naive|ewma|linear_trend|auto_ets|lightgbm_quantile}`

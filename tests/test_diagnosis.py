@@ -87,3 +87,23 @@ def test_rising_traffic_and_latency_with_low_cpu_flags_non_cpu_bottleneck() -> N
     result = diagnose(_frame(rows))
     assert result.diagnosis == Diagnosis.LIKELY_NON_CPU_BOTTLENECK
     assert result.scaling_will_help
+
+
+def test_memory_leak_rule_reads_cpu_demand_without_request_metrics() -> None:
+    # No request metrics: request_rate is 0 and demand is total CPU. Memory
+    # rising with CPU demand is load, not a leak.
+    rows = [
+        _obs(
+            request_rate=0.0,
+            cpu_usage_millicores=1000.0 + 100.0 * i,
+            memory_usage_mb=200.0 + i,
+        )
+        for i in range(20)
+    ]
+    assert diagnose(_frame(rows)).diagnosis == Diagnosis.HEALTHY
+
+    flat = [
+        _obs(request_rate=0.0, cpu_usage_millicores=1000.0, memory_usage_mb=200.0 + i)
+        for i in range(20)
+    ]
+    assert diagnose(_frame(flat)).diagnosis == Diagnosis.POSSIBLE_MEMORY_LEAK

@@ -56,3 +56,11 @@ def test_single_observation_still_gets_a_nonzero_band() -> None:
     forecast = NaiveModel().predict(np.array([500.0]), horizon=3)
     assert np.all(forecast.p90 > forecast.p50)
     assert np.all(forecast.p10 < forecast.p50)
+
+
+def test_steep_decline_never_forecasts_negative_or_crossed_quantiles() -> None:
+    history = np.linspace(500.0, 10.0, 60)
+    forecast = LinearTrendModel().predict(history, 30)
+    assert (forecast.p50 >= 0).all()
+    assert (forecast.p10 <= forecast.p50).all()
+    assert (forecast.p50 <= forecast.p90).all()

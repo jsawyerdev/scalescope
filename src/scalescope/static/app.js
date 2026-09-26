@@ -587,7 +587,8 @@ function renderSource(source) {
 
 async function refresh() {
   if (!currentWorkload) return;
-  const path = encodeURIComponent(currentWorkload);
+  const workload = currentWorkload;
+  const path = encodeURIComponent(workload);
   try {
     const [observations, recommendations, source] = await Promise.all([
       fetchJson(`/api/workloads/${path}/observations?limit=200`),
@@ -601,6 +602,8 @@ async function refresh() {
       selectedModel = names.includes(actuationModel) ? actuationModel : names[0];
     }
     const forecast = await fetchJson(`/api/workloads/${path}/forecast?model=${selectedModel}`);
+    // The workload may have changed while these requests were in flight.
+    if (workload !== currentWorkload) return;
     const rec = recommendations.models.find((m) => m.model === selectedModel);
     const latest = observations[observations.length - 1];
     const horizonText = formatDuration(forecast.p50.length * tickSecondsOf(source));
@@ -681,10 +684,12 @@ function wireReplayButton() {
   const status = document.getElementById("replay-status");
   btn.addEventListener("click", async () => {
     if (!currentWorkload) return;
+    const workload = currentWorkload;
     btn.disabled = true;
     status.textContent = "re-forecasting past points with every model...";
     try {
-      const result = await fetchJson(`/api/workloads/${encodeURIComponent(currentWorkload)}/replay`);
+      const result = await fetchJson(`/api/workloads/${encodeURIComponent(workload)}/replay`);
+      if (workload !== currentWorkload) return;
       const rows = result.scores.map((s, i) => {
         const row = document.createElement("tr");
         if (i === 0) row.className = "selected";
@@ -699,6 +704,7 @@ function wireReplayButton() {
       document.getElementById("replay-table-body").replaceChildren(...rows);
       status.textContent = `${result.n_observations} observations, ${result.scores.length} models scored`;
     } catch (err) {
+      if (workload !== currentWorkload) return;
       status.textContent = `replay failed: ${err.message}`;
     } finally {
       btn.disabled = false;
@@ -711,12 +717,14 @@ function wireScalingReplayButton() {
   const status = document.getElementById("scaling-replay-status");
   btn.addEventListener("click", async () => {
     if (!currentWorkload) return;
+    const workload = currentWorkload;
     btn.disabled = true;
     status.textContent = "replaying recorded demand through both policies...";
     try {
       const result = await fetchJson(
-        `/api/workloads/${encodeURIComponent(currentWorkload)}/scaling-replay`
+        `/api/workloads/${encodeURIComponent(workload)}/scaling-replay`
       );
+      if (workload !== currentWorkload) return;
       const rows = result.outcomes.map((o) => {
         const row = document.createElement("tr");
         appendCell(row, o.name);
@@ -730,11 +738,21 @@ function wireScalingReplayButton() {
         ? `${formatDuration(result.replayed_seconds)} replayed, a decision every ${formatDuration(result.decision_every_seconds)}`
         : `Cannot replay yet: ${result.reason}.`;
     } catch (err) {
+      if (workload !== currentWorkload) return;
       status.textContent = `scaling replay failed: ${err.message}`;
     } finally {
       btn.disabled = false;
     }
   });
+}
+
+// Replay results belong to one workload; clear them when it changes.
+function clearReplayResults() {
+  for (const id of ["replay-table-body", "scaling-replay-body"]) {
+    document.getElementById(id).replaceChildren();
+  }
+  setText("replay-status", "-");
+  setText("scaling-replay-status", "-");
 }
 
 // ---------- startup ----------
@@ -772,6 +790,7 @@ async function loadWorkloads() {
   workloadSelect.addEventListener("change", () => {
     currentWorkload = workloadSelect.value;
     selectedModel = actuationModel;
+    clearReplayResults();
     refresh();
   });
   await refresh();

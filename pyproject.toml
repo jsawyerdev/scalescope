@@ -1,6 +1,6 @@
 [project]
 name = "scalescope"
-version = "0.14.0"
+version = "0.14.1"
 description = "Explainable predictive Kubernetes capacity intelligence lab"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
@@ -29,6 +29,10 @@ dependencies = [
     "statsforecast>=2.0",
     "kubernetes>=31.0",
     "httpx>=0.27",
+    # Imported directly (auth middleware, Kubernetes transport errors), not
+    # only through fastapi and kubernetes.
+    "starlette>=0.40",
+    "urllib3>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -67,11 +71,6 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = [
-    "duckdb.*",
-    "polars.*",
-    "statsforecast.*",
-    "mlforecast.*",
-    "lightgbm.*",
     "pandas.*",
     "kubernetes.*",
 ]

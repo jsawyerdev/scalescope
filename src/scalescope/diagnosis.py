@@ -12,6 +12,7 @@ from enum import Enum
 import polars as pl
 
 from scalescope.capacity import DEFAULT_MAX_REPLICAS
+from scalescope.demand import demand_history, demand_signal
 
 
 class Diagnosis(Enum):
@@ -36,7 +37,7 @@ MIN_TREND_WINDOW_STEPS = 10
 CPU_THROTTLE_THRESHOLD_PCT = 5.0
 CPU_HIGH_THRESHOLD_PCT = 80.0
 MEMORY_SLOPE_MB_PER_STEP_THRESHOLD = 0.3
-TRAFFIC_FLAT_THRESHOLD_PCT = 5.0
+DEMAND_FLAT_THRESHOLD_PCT = 5.0
 TRAFFIC_RISE_THRESHOLD_PCT = 15.0
 LATENCY_RISE_THRESHOLD_PCT = 15.0
 PENDING_PODS_THRESHOLD = 1
@@ -78,20 +79,19 @@ def diagnose(
         memory_slope = (
             window["memory_usage_mb"][-1] - window["memory_usage_mb"][0]
         ) / (len(window) - 1)
-        traffic_change_pct = (
-            abs(window["request_rate"][-1] - window["request_rate"][0])
-            / max(window["request_rate"][0], 1.0)
-            * 100
-        )
+        # Demand, not request_rate: a workload without request metrics
+        # reports request_rate 0, which would always read as flat.
+        demand = demand_history(window, demand_signal(window))
+        demand_change_pct = abs(demand[-1] - demand[0]) / max(demand[0], 1.0) * 100
         if (
             memory_slope >= MEMORY_SLOPE_MB_PER_STEP_THRESHOLD
-            and traffic_change_pct < TRAFFIC_FLAT_THRESHOLD_PCT
+            and demand_change_pct < DEMAND_FLAT_THRESHOLD_PCT
         ):
             return DiagnosisResult(
                 Diagnosis.POSSIBLE_MEMORY_LEAK,
                 False,
-                f"Memory growing {memory_slope:.2f} MB/tick while traffic is flat "
-                f"({traffic_change_pct:.1f}% change). Scaling would mask, not fix, "
+                f"Memory growing {memory_slope:.2f} MB/tick while demand is flat "
+                f"({demand_change_pct:.1f}% change). Scaling would mask, not fix, "
                 "a probable memory leak.",
             )
 

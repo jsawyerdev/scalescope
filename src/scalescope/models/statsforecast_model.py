@@ -53,6 +53,7 @@ class AutoEtsModel:
             logger.exception("AutoETS failed, falling back to naive")
             return NaiveModel().predict(history, horizon)
 
+        # forecast() is typed pandas-or-polars; a pandas input returns pandas.
         if not isinstance(forecast_df, pd.DataFrame):
             logger.error(
                 "AutoETS returned unexpected forecast type: %s",

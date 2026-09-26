@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from scalescope.api.routes import router
@@ -295,6 +296,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             settings.k8s_deployment,
         )
     task.add_done_callback(_record_background_failure)
+    app_state["data_source_task"] = task
 
     try:
         yield
@@ -302,15 +304,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+        app_state.pop("data_source_task", None)
         store.close()
 
 
 app = FastAPI(title="ScaleScope", lifespan=lifespan)
 
 
-@app.get("/healthz")
-def healthz() -> dict[str, str]:
-    """Unauthenticated liveness check - the only route BasicAuthMiddleware exempts."""
+@app.get("/healthz", response_model=None)
+def healthz() -> dict[str, str] | JSONResponse:
+    """Unauthenticated liveness check - the only route BasicAuthMiddleware exempts.
+
+    503 once the data-source loop has stopped (it failed to start or crashed):
+    nothing restarts it in-process, so the kubelet must restart the pod.
+    """
+    task = app_state.get("data_source_task")
+    if task is not None and task.done():
+        return JSONResponse({"status": "data source stopped"}, status_code=503)
     return {"status": "ok"}
 
 

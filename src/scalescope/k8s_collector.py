@@ -3,20 +3,17 @@
 Populates the same observation schema DEMO mode's simulator produces, from
 a real Deployment's Pod/metrics.k8s.io state. Uses only get/list verbs on
 apps/v1 Deployments, core/v1 Pods, and (if metrics-server is installed)
-metrics.k8s.io PodMetrics - see k8s/rbac/ for the exact Role this needs.
-Never writes to the cluster.
+metrics.k8s.io PodMetrics (the ClusterRole in k8s/scalescope/, or the
+namespace Role in k8s/rbac/). Never writes to the cluster.
 
-Honesty note: `request_rate`, `latency_p95_ms`, and `error_rate` are not
-derivable from the Kubernetes API or metrics-server alone - they need
-request-level instrumentation this collector does not otherwise have. When
-`metrics_url` is configured, they're read from that workload's own
-Prometheus `/metrics` (see `sample-workload/app/main.py`'s
-`sample_workload_demand_rps`/`latency_p95_ms`/`error_rate` gauges for the
-expected contract). Otherwise `request_rate` can come from a Prometheus
-server via one per-pod PromQL query each tick. Anything without a source is
-reported as 0.0 rather than a fabricated value. `cpu_throttled_pct` has no source in either case yet
-(needs cAdvisor container_cpu_cfs_throttled data, not exposed here) and is
-always 0.0.
+Request rate, p95 latency, error rate, and CPU throttling are not
+derivable from the Kubernetes API or metrics-server. The first three come
+from the workload's own Prometheus `/metrics` when `metrics_url` is
+configured (the `sample_workload_*` gauges in `sample-workload/app/main.py`
+define the contract); any of the four can come from a Prometheus server,
+one per-pod query per signal each tick (`PrometheusQueries`). A signal
+with no source is reported as 0.0 rather than a fabricated value.
+`restarts` is the pods' cumulative container restart count.
 """
 
 from __future__ import annotations
@@ -237,7 +234,10 @@ class PrometheusQueries:
     error_rate: str = ""
 
 
-PodSeries = dict[tuple[str, str], float]
+# Every series value per (namespace, pod). A query may return several series
+# for one pod (one per container, say); each signal's own rule in
+# `_observe` aggregates them, since summing is wrong for latency or ratios.
+PodSeries = dict[tuple[str, str], list[float]]
 
 
 def _pod_values(
@@ -246,7 +246,7 @@ def _pod_values(
     if not series:
         return []
     keys = ((namespace, pod.metadata.name) for pod in pods)
-    return [series[key] for key in keys if key in series]
+    return [value for key in keys for value in series.get(key, [])]
 
 
 @dataclass(frozen=True)
@@ -523,7 +523,7 @@ class KubernetesObservationCollector:
                 value = float(series["value"][1])
                 if math.isfinite(value):
                     key = (labels["namespace"], labels["pod"])
-                    values[key] = values.get(key, 0.0) + value
+                    values.setdefault(key, []).append(value)
         except httpx.HTTPError, KeyError, TypeError, ValueError, IndexError:
             return None
         return values

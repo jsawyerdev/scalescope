@@ -13,13 +13,18 @@ _MIN_HISTORY = 8
 def _spread(
     point: np.ndarray, residual_std: float
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(p50, p10, p90) around `point`; demand is never negative, so all are >= 0."""
     widen = 1 + np.arange(len(point)) * 0.05
     band = 1.2816 * residual_std * widen  # ~80% interval
-    return point, np.maximum(point - band, 0), np.maximum(point + band, 0)
+    return (
+        np.maximum(point, 0),
+        np.maximum(point - band, 0),
+        np.maximum(point + band, 0),
+    )
 
 
 def _residual_std(history: np.ndarray) -> float:
-    """Std of first differences, floored at 1.0 so a band never collapses to zero."""
+    """Std of first differences; 1.0 for a constant series, so bands never collapse."""
     if len(history) < 2:
         return 1.0
     return float(np.std(np.diff(history))) or 1.0

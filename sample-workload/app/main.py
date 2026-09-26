@@ -5,8 +5,8 @@ Self-contained: a background task randomizes its own load internally
 demand/latency/error-rate signals), so deploying this alone - with no
 external load generator - produces varying CPU/memory usage a real HPA
 can react to, and real anomaly signals ScaleScope's diagnosis engine can
-classify. `scripts/generate-load.sh` still works for on-demand extra load
-against `/work`, but is no longer required for the demo to be alive.
+classify. `scripts/generate-load.sh` adds optional on-demand load against
+`/work`.
 """
 
 from __future__ import annotations
@@ -364,21 +364,29 @@ def _describe_stress_workers(worker_count: int) -> str:
     return f"saturating {worker_count} CPU worker {noun}"
 
 
+def _enter_phase(previous: _LoadPhase | None, phase: _LoadPhase) -> None:
+    """Report the new phase; leaving any leaking phase releases the leak."""
+    logger.info("phase=%s", phase.name)
+    _set_simulated_fault_for_phase(phase)
+    leak_ended = (
+        previous is not None
+        and previous.leak_bytes_per_tick > 0
+        and phase.leak_bytes_per_tick == 0
+    )
+    if leak_ended and _leak_buffer:
+        logger.info("leak phase ended, releasing %d bytes", len(_leak_buffer))
+        _leak_buffer.clear()
+        MEMORY_LEAK_BYTES.set(0)
+
+
 async def _load_simulator() -> None:
     rng = random.SystemRandom()
-    last_phase_name: str | None = None
+    last_phase: _LoadPhase | None = None
     while True:
         phase = _current_phase(time.time())
-        if phase.name != last_phase_name:
-            logger.info("phase=%s", phase.name)
-            _set_simulated_fault_for_phase(phase)
-            if last_phase_name == "memory_leak" and _leak_buffer:
-                logger.info(
-                    "memory_leak phase ended, releasing %d bytes", len(_leak_buffer)
-                )
-                _leak_buffer.clear()
-                MEMORY_LEAK_BYTES.set(0)
-            last_phase_name = phase.name
+        if last_phase is None or phase.name != last_phase.name:
+            _enter_phase(last_phase, phase)
+            last_phase = phase
 
         demand = rng.uniform(*phase.demand_rps)
         DEMAND_RPS.set(demand)

@@ -112,8 +112,7 @@ def replay_scaling(
     replicas = observations["replicas"].to_numpy()
     ticks = len(demand) - start
     decision_every = max(1, math.ceil(ticks / MAX_DECISIONS))
-    utilization = capacity.target_utilization or policy.target_utilization
-    safe_per_pod = capacity.per_pod * utilization
+    safe_per_pod = capacity.per_pod * capacity.utilization(policy)
 
     def bounded(pods: int) -> int:
         return max(policy.min_replicas, min(policy.max_replicas, pods))
