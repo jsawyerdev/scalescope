@@ -21,7 +21,11 @@ from kubernetes import client
 from kubernetes.client.rest import ApiException
 from urllib3.exceptions import HTTPError as Urllib3HTTPError
 
-from scalescope.k8s_collector import K8S_REQUEST_TIMEOUT_SECONDS, load_k8s_config
+from scalescope.k8s_collector import (
+    K8S_REQUEST_TIMEOUT_SECONDS,
+    k8s_error_reason,
+    load_k8s_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +39,8 @@ class ActuationError(RuntimeError):
 
 
 class KubernetesActuator:
+    """Writes replica counts for Deployments in one namespace."""
+
     def __init__(self, namespace: str, kubeconfig_path: str | None = None) -> None:
         load_k8s_config(kubeconfig_path)
         self._namespace = namespace
@@ -46,13 +52,10 @@ class KubernetesActuator:
             hpas = self._autoscaling.list_namespaced_horizontal_pod_autoscaler(
                 self._namespace, _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS
             ).items
-        except ApiException as exc:
+        except (ApiException, Urllib3HTTPError) as exc:
             raise ActuationError(
-                f"could not list HorizontalPodAutoscalers in {self._namespace}: {exc.reason}"
-            ) from exc
-        except Urllib3HTTPError as exc:
-            raise ActuationError(
-                f"could not list HorizontalPodAutoscalers in {self._namespace}: {exc}"
+                f"could not list HorizontalPodAutoscalers in {self._namespace}: "
+                f"{k8s_error_reason(exc)}"
             ) from exc
         for hpa in hpas:
             target = hpa.spec.scale_target_ref
@@ -61,7 +64,11 @@ class KubernetesActuator:
         return None
 
     def scale(self, deployment_name: str, replicas: int) -> None:
-        """Set `deployment_name`'s replica count. Raises on any precondition failure."""
+        """Set `deployment_name`'s replica count.
+
+        Raises HpaConflictError if a HorizontalPodAutoscaler already targets
+        the Deployment, and ActuationError if the HPA check or the write fails.
+        """
         conflicting_hpa = self._competing_hpa_name(deployment_name)
         if conflicting_hpa is not None:
             raise HpaConflictError(
@@ -77,13 +84,10 @@ class KubernetesActuator:
                 body={"spec": {"replicas": replicas}},
                 _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
             )
-        except ApiException as exc:
+        except (ApiException, Urllib3HTTPError) as exc:
             raise ActuationError(
-                f"failed to scale {self._namespace}/{deployment_name} to {replicas}: {exc.reason}"
-            ) from exc
-        except Urllib3HTTPError as exc:
-            raise ActuationError(
-                f"failed to scale {self._namespace}/{deployment_name} to {replicas}: {exc}"
+                f"failed to scale {self._namespace}/{deployment_name} to {replicas}: "
+                f"{k8s_error_reason(exc)}"
             ) from exc
         logger.info(
             "scaled %s/%s to %d replicas", self._namespace, deployment_name, replicas

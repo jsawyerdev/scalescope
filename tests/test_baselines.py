@@ -32,3 +32,21 @@ def test_seasonal_naive_falls_back_on_short_history() -> None:
     history = np.array([1.0, 2.0, 3.0])
     forecast = SeasonalNaiveModel().predict(history, horizon=3)
     assert forecast.model_name == "naive"
+
+
+def test_seasonal_naive_repeats_detected_cycle_in_phase() -> None:
+    period = 300
+    t = np.arange(period * 3)
+    series = 700.0 + 400.0 * np.sin(2 * np.pi * t / period)
+    history, future = series[: period * 2], series[period * 2 : period * 2 + 30]
+
+    forecast = SeasonalNaiveModel().predict(history, horizon=30)
+
+    assert forecast.model_name == "seasonal_naive"
+    assert np.allclose(forecast.p50, future)
+
+
+def test_seasonal_naive_falls_back_without_detected_period() -> None:
+    history = np.full(400, 250.0)
+    forecast = SeasonalNaiveModel().predict(history, horizon=3)
+    assert forecast.model_name == "naive"

@@ -79,6 +79,29 @@ def test_malformed_authorization_header_rejected() -> None:
     assert response.status_code == 401
 
 
+def test_non_ascii_credentials_rejected_without_server_error() -> None:
+    client = TestClient(_app(), raise_server_exceptions=False)
+    response = client.get(
+        "/protected", headers={"Authorization": _basic_header("opérateur", "s3cret")}
+    )
+    assert response.status_code == 401
+
+
+def test_non_ascii_configured_password_accepted() -> None:
+    app = FastAPI()
+
+    @app.get("/protected")
+    def protected() -> dict[str, str]:
+        return {"data": "secret"}
+
+    app.add_middleware(BasicAuthMiddleware, username="operator", password="pässwörd")
+    client = TestClient(app)
+    response = client.get(
+        "/protected", headers={"Authorization": _basic_header("operator", "pässwörd")}
+    )
+    assert response.status_code == 200
+
+
 def test_authorization_header_without_colon_rejected() -> None:
     client = TestClient(_app())
     token = base64.b64encode(b"operator").decode()

@@ -117,6 +117,9 @@ black src tests sample-workload/app scripts/tune
 echo "== lint =="
 ruff check .
 
+echo "== type check =="
+mypy
+
 echo "== tests =="
 pytest -q
 

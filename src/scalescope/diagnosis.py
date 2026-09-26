@@ -31,10 +31,14 @@ class DiagnosisResult:
 
 
 # Thresholds are deliberately explicit and reviewable, not learned.
+DIAGNOSIS_WINDOW_STEPS = 30
+MIN_TREND_WINDOW_STEPS = 10
 CPU_THROTTLE_THRESHOLD_PCT = 5.0
 CPU_HIGH_THRESHOLD_PCT = 80.0
 MEMORY_SLOPE_MB_PER_STEP_THRESHOLD = 0.3
 TRAFFIC_FLAT_THRESHOLD_PCT = 5.0
+TRAFFIC_RISE_THRESHOLD_PCT = 15.0
+LATENCY_RISE_THRESHOLD_PCT = 15.0
 PENDING_PODS_THRESHOLD = 1
 
 
@@ -44,13 +48,14 @@ def diagnose(
     """Classify the current health state of a workload from recent observations.
 
     `observations` must be sorted ascending by ts and contain at least the
-    columns produced by `scalescope.simulator.WorkloadSimulator.step`.
+    columns produced by `scalescope.simulator.WorkloadSimulator.step`. Only
+    the newest `DIAGNOSIS_WINDOW_STEPS` rows are considered.
     """
     if observations.is_empty():
         return DiagnosisResult(Diagnosis.HEALTHY, True, "no data yet")
 
     latest = observations.tail(1).row(0, named=True)
-    window = observations.tail(30)
+    window = observations.tail(DIAGNOSIS_WINDOW_STEPS)
 
     if latest["pending_pods"] >= PENDING_PODS_THRESHOLD:
         return DiagnosisResult(
@@ -69,10 +74,10 @@ def diagnose(
             "Adding replicas has low expected value until limits are reviewed.",
         )
 
-    if len(window) >= 10:
+    if len(window) >= MIN_TREND_WINDOW_STEPS:
         memory_slope = (
             window["memory_usage_mb"][-1] - window["memory_usage_mb"][0]
-        ) / len(window)
+        ) / (len(window) - 1)
         traffic_change_pct = (
             abs(window["request_rate"][-1] - window["request_rate"][0])
             / max(window["request_rate"][0], 1.0)
@@ -101,7 +106,7 @@ def diagnose(
             "demand still increasing beyond configured ceiling.",
         )
 
-    if len(window) >= 10:
+    if len(window) >= MIN_TREND_WINDOW_STEPS:
         traffic_change_pct = (
             (window["request_rate"][-1] - window["request_rate"][0])
             / max(window["request_rate"][0], 1.0)
@@ -113,9 +118,9 @@ def diagnose(
             * 100
         )
         if (
-            traffic_change_pct > 15
+            traffic_change_pct > TRAFFIC_RISE_THRESHOLD_PCT
             and latest["cpu_usage_pct"] < CPU_HIGH_THRESHOLD_PCT
-            and latency_change_pct > 15
+            and latency_change_pct > LATENCY_RISE_THRESHOLD_PCT
         ):
             return DiagnosisResult(
                 Diagnosis.LIKELY_NON_CPU_BOTTLENECK,

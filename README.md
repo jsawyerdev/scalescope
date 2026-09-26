@@ -149,11 +149,11 @@ not show up as demand spikes in the series the forecasters fit on.
 | Model | Fits on | Min history | Fallback | Reasonable fit | Poor fit |
 |---|---|---|---|---|---|
 | `naive` | last observed value | none | — | flat/near-term stretches | trending or seasonal periods |
-| `seasonal_naive` | value from 150 ticks ago (half the ~300-tick daily cycle) | 150 + 8 ticks | `naive` below threshold | once the daily cycle is established | cold start, or after a regime change (e.g. mid-`traffic_spike`) |
+| `seasonal_naive` | the last full cycle of the period `detect_period` finds in the history (the ~300-tick daily cycle in DEMO) | two full cycles (and ≥ 100 ticks) | `naive` until a period is confidently detected | once the cycle is established | cold start, or when a fault in the previous cycle (e.g. a `traffic_spike`) gets replayed |
 | `ewma` | exponentially weighted average of the whole history (alpha 0.3), extrapolated flat | none | — | smoothing out noise on a roughly flat series | any series with real trend or seasonality, since it always flattens |
 | `linear_trend` | least-squares line over the last 60 points | 8 ticks | `naive` below threshold | short local trends (e.g. climbing into a spike) | the full sine cycle, since a straight line can't turn over |
-| `auto_ets` | Nixtla StatsForecast `AutoETS`, exponential-smoothing state space fit to the whole history, 80% prediction interval | 30 ticks | `naive`, on short history or if the fit raises | general-purpose statistical fit; better than the baselines once enough history exists | `season_length=1` is passed (no periodicity told to the model), so it does not exploit the known 300-tick cycle either |
-| `lightgbm_quantile` | three independent LightGBM quantile regressors (p10/p50/p90) over lag (1,2,3,5,10) and rolling mean/std(5) features via MLForecast | 60 ticks | `naive`, on short history or if fitting/predicting raises | has enough history and lag structure to pick up the daily cycle and recent spike dynamics | short or noisy history — 60 ticks is barely two lag windows, and quantile crossing (corrected by sorting p10/p50/p90 per step) signals the fit is unstable |
+| `auto_ets` | Nixtla StatsForecast `AutoETS`, exponential-smoothing state space fit to the whole history, 80% prediction interval; `season_length` is the period `detect_period` finds (1 when none is confident) | 30 ticks | `naive`, on short history or if the fit raises | general-purpose statistical fit; better than the baselines once enough history exists | histories shorter than two cycles, where no period is detected and it fits without seasonality |
+| `lightgbm_quantile` | three independent LightGBM quantile regressors (p10/p50/p90) over lag (1,2,3,5,10, plus the detected period when there is one) and rolling mean/std(5) features via MLForecast | 60 ticks | `naive`, on short history or if fitting/predicting raises | has enough history and lag structure to pick up the daily cycle and recent spike dynamics | short or noisy history — 60 ticks is barely two lag windows, and quantile crossing (corrected by sorting p10/p50/p90 per step) signals the fit is unstable |
 
 Every baseline computes its p10/p90 band from the standard deviation of first differences in the
 history (`_residual_std`), widened linearly with forecast horizon — it is not a statistically
@@ -336,8 +336,8 @@ default): no authentication — every route, including the dashboard itself,
 is open. This is an explicit supported mode for trusted-LAN or homelab
 operators who deliberately accept that risk. Setting exactly one of the two
 auth variables is a startup configuration error; ScaleScope refuses that
-state rather than silently disabling auth. When `SCALESCOPE_ACTUATE=true` is
-set without credentials, ScaleScope logs a startup warning and still starts.
+state rather than silently disabling auth. Running without credentials logs
+a startup warning (including when `SCALESCOPE_ACTUATE=true`) and still starts.
 Set both variables to enable HTTP Basic Auth
 (`src/scalescope/auth.py`, applied as ASGI middleware so it covers the
 static dashboard files as well as `/api/*`, not just the API):
@@ -570,8 +570,8 @@ sequenceDiagram
 
     UI->>API: kind={cpu|memory|traffic|stress}, duration_seconds=45
     alt SCALESCOPE_MODE=demo
-        alt kind=stress
-            API-->>UI: 501 stress trigger is OBSERVE-only
+        alt kind=stress, or not the simulated workload
+            API-->>UI: 501 with the reason
         else cpu/memory/traffic
         API->>Sim: trigger_fault(fault, duration_ticks)
         Sim-->>API: fault now active

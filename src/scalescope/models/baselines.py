@@ -5,9 +5,9 @@ from __future__ import annotations
 import numpy as np
 
 from scalescope.models.base import Forecast
+from scalescope.models.seasonality import detect_period
 
 _MIN_HISTORY = 8
-_SEASONAL_PERIOD = 150  # half of the simulator's ~300-tick daily cycle
 
 
 def _spread(
@@ -39,15 +39,16 @@ class NaiveModel:
 
 
 class SeasonalNaiveModel:
-    """Repeats the value from one seasonal period ago; falls back to naive."""
+    """Repeats the last detected seasonal cycle; naive when none is detected."""
 
     name = "seasonal_naive"
 
     def predict(self, history: np.ndarray, horizon: int) -> Forecast:
-        if len(history) < _SEASONAL_PERIOD + _MIN_HISTORY:
+        period = detect_period(history)
+        if period <= 1:
             return NaiveModel().predict(history, horizon)
-        seasonal_slice = history[-_SEASONAL_PERIOD:]
-        point = np.array([seasonal_slice[i % _SEASONAL_PERIOD] for i in range(horizon)])
+        seasonal_slice = history[-period:]
+        point = np.array([seasonal_slice[i % period] for i in range(horizon)])
         std = _residual_std(history)
         p50, p10, p90 = _spread(point, std)
         return Forecast(self.name, p10, p50, p90)

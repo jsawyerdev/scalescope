@@ -5,7 +5,8 @@
 # Requires k8s/rbac/*.yaml already applied. This script itself only reads
 # (`kubectl get`/`config view`) - it does not grant or change any permission,
 # only exports credentials for the identity k8s/rbac/role.yaml already
-# defines (read-only unless SCALESCOPE_ACTUATE=true is also set).
+# defines. That identity can patch deployments/scale in its namespace;
+# ScaleScope only uses that permission when SCALESCOPE_ACTUATE=true.
 set -euo pipefail
 
 NAMESPACE="scalescope-demo"
@@ -29,7 +30,13 @@ if [ -z "$TOKEN" ]; then
     exit 1
 fi
 
-cat <<EOF > "$OUTPUT_PATH"
+# The file holds a live token: create it owner-only from the first byte
+# (mktemp is 0600) and move it into place, rather than writing it with the
+# default umask and tightening permissions afterwards.
+TMP_OUTPUT="$(mktemp "${OUTPUT_PATH}.XXXXXX")"
+trap 'rm -f "$TMP_OUTPUT"' EXIT
+
+cat <<EOF > "$TMP_OUTPUT"
 apiVersion: v1
 kind: Config
 clusters:
@@ -50,5 +57,5 @@ users:
       token: ${TOKEN}
 EOF
 
-chmod 600 "$OUTPUT_PATH"
+mv "$TMP_OUTPUT" "$OUTPUT_PATH"
 echo "wrote scoped kubeconfig to $OUTPUT_PATH"

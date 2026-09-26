@@ -56,3 +56,14 @@ def test_settings_rejects_non_positive_numeric_values(
 
     with pytest.raises(ValueError, match="SCALESCOPE_HORIZON_STEPS"):
         Settings()
+
+
+@pytest.mark.parametrize("tick_seconds", ["0", "-1", "nan", "inf"])
+def test_settings_rejects_non_positive_or_non_finite_tick(
+    monkeypatch: pytest.MonkeyPatch, tick_seconds: str
+) -> None:
+    monkeypatch.setenv("SCALESCOPE_MODE", "demo")
+    monkeypatch.setenv("SCALESCOPE_TICK_SECONDS", tick_seconds)
+
+    with pytest.raises(ValueError, match="SCALESCOPE_TICK_SECONDS"):
+        Settings()

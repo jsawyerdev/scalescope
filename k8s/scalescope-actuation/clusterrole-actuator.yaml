@@ -5,7 +5,7 @@ metadata:
 rules:
   - apiGroups: ["apps"]
     resources: ["deployments/scale"]
-    verbs: ["patch", "update"]
+    verbs: ["patch"]
   - apiGroups: ["autoscaling"]
     resources: ["horizontalpodautoscalers"]
     verbs: ["get", "list"]

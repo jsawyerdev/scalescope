@@ -1,7 +1,8 @@
 """Common interface every forecasting model implements.
 
-The capacity engine and diagnosis engine depend only on this interface, never
-on a specific model library, so models are interchangeable plugins.
+The capacity engine, API, and replay lab depend only on this interface, never
+on a specific model library, so models are interchangeable plugins. (The
+diagnosis engine never uses a model at all.)
 """
 
 from __future__ import annotations

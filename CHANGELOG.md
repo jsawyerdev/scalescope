@@ -4,6 +4,53 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [Unreleased]
+
+### Fixed
+
+- HTTP Basic Auth no longer returns a 500 for non-ASCII usernames or
+  passwords, and always compares both fields so response timing does not
+  reveal whether the username alone was correct.
+- Observation timestamps are stored as UTC regardless of the host timezone;
+  previously DuckDB converted them to local wall-clock time on non-UTC hosts,
+  shifting the API's `ts` values and the dashboard's freshness indicator.
+- `seasonal_naive` now repeats the last cycle of the period detected in the
+  workload's own history. It previously used a fixed 150-tick lag, half the
+  simulator's 300-tick cycle, so it forecast the daily pattern inverted.
+- OBSERVE mode drops `NaN`/`Inf` Prometheus gauge values instead of storing
+  them, which previously broke every recommendation for that workload.
+- OBSERVE mode parses every Kubernetes quantity suffix (`k`, `P`, `E`, `Pi`,
+  `Ei`, ...) and reports malformed pod metrics as a per-target collection
+  error instead of stopping the observe loop.
+- The diagnosis engine measures memory growth per tick (over the window's
+  steps, not its row count), matching the `MB/tick` threshold it reports.
+- `SCALESCOPE_TICK_SECONDS` must be finite; `nan`/`inf` previously passed
+  validation and stopped or stalled the data loop.
+- DEMO load triggers reject workloads the simulator does not drive, and
+  OBSERVE triggers no longer let the workload's JSON reply overwrite
+  ScaleScope's own `workload`/`kind`/`duration_seconds`/`target` fields.
+- The dashboard retries its initial workload load after a connection error
+  instead of staying blank.
+- `scripts/generate-observer-kubeconfig.sh` creates the kubeconfig
+  owner-only from the start instead of briefly exposing the token under the
+  default umask.
+
+### Changed
+
+- Actuation RBAC grants only `patch` on `deployments/scale`; the unused
+  `update` verb was removed.
+- The Docker builder stage no longer sets `PYTHONOPTIMIZE`, which made pip
+  precompile only bytecode the runtime stage never loads; unused builder-only
+  `TZ`/`PYTHONHASHSEED` settings and `setuptools`/`wheel` upgrades were
+  removed.
+- Removed unreachable code paths: the 409 "no observations yet" responses
+  (an unknown workload is exactly one with no observations, still 404),
+  unsupported-mode branches, and a dead capacity guard.
+- Replay constants are shared between the API and `scripts/tune`, and
+  diagnosis window/threshold literals are named constants.
+- `scripts/rebuild.sh` runs the configured `mypy` gate alongside formatting,
+  lint, and tests.
+
 ## [0.11.1]
 
 ### Fixed

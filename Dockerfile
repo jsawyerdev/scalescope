@@ -2,10 +2,10 @@
 
 FROM python:3.14-slim AS builder
 
+# No PYTHONOPTIMIZE here: pip would then precompile only *.opt-1.pyc files,
+# which the runtime stage (no -O) never loads, and with
+# PYTHONDONTWRITEBYTECODE set there every start would recompile from source.
 ENV PYTHONUNBUFFERED=1 \
-    TZ=Europe/London \
-    PYTHONOPTIMIZE=1 \
-    PYTHONHASHSEED=0 \
     PIP_ROOT_USER_ACTION=ignore \
     PIP_PROGRESS_BAR=off
 
@@ -24,7 +24,7 @@ WORKDIR /app
 COPY pyproject.toml README.md LICENSE NOTICE ./
 RUN --mount=type=cache,target=/root/.cache/pip \
     mkdir -p src/scalescope && touch src/scalescope/__init__.py \
-    && pip install --upgrade pip setuptools wheel \
+    && pip install --upgrade pip \
     && pip install .
 
 COPY src ./src

@@ -23,8 +23,9 @@ EXEMPT_PATHS = frozenset({"/healthz"})
 class BasicAuthMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp, username: str, password: str) -> None:
         super().__init__(app)
-        self._username = username
-        self._password = password
+        # Compared as bytes: secrets.compare_digest rejects non-ASCII str.
+        self._username = username.encode("utf-8")
+        self._password = password.encode("utf-8")
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
@@ -48,8 +49,8 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
             return False
         if not separator:
             return False
-        # Constant-time comparison: a timing difference between a wrong
-        # username and a wrong password would leak which one was correct.
-        return secrets.compare_digest(
-            username, self._username
-        ) and secrets.compare_digest(password, self._password)
+        # Both comparisons always run (no short-circuit) so response timing
+        # does not reveal whether the username alone was correct.
+        username_ok = secrets.compare_digest(username.encode("utf-8"), self._username)
+        password_ok = secrets.compare_digest(password.encode("utf-8"), self._password)
+        return username_ok and password_ok

@@ -1,17 +1,16 @@
-"""DuckDB-backed observation, forecast, and recommendation store."""
+"""DuckDB-backed observation store."""
 
 from __future__ import annotations
 
-import logging
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import duckdb
 import polars as pl
 
-logger = logging.getLogger(__name__)
-
-_OBSERVATION_COLUMNS = [
+_OBSERVATION_COLUMNS = (
     "ts",
     "workload",
     "replicas",
@@ -23,7 +22,7 @@ _OBSERVATION_COLUMNS = [
     "error_rate",
     "pending_pods",
     "restarts",
-]
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS observations (
@@ -41,6 +40,26 @@ CREATE TABLE IF NOT EXISTS observations (
 );
 """
 
+# Column order must match _OBSERVATION_COLUMNS, which supplies the values.
+_INSERT = """
+INSERT INTO observations
+(ts, workload, replicas, request_rate, cpu_usage_pct, cpu_throttled_pct,
+ memory_usage_mb, latency_p95_ms, error_rate, pending_pods, restarts)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+
+def _naive_utc(ts: datetime) -> datetime:
+    """`ts` as a naive UTC datetime, the convention of the TIMESTAMP column.
+
+    DuckDB converts a timezone-aware datetime to the process's local wall
+    clock when binding it to a plain TIMESTAMP, which would shift every
+    stored observation on any host not running in UTC.
+    """
+    if ts.tzinfo is None:
+        return ts
+    return ts.astimezone(UTC).replace(tzinfo=None)
+
 
 class Store:
     """Owns the DuckDB connection and schema for one ScaleScope instance.
@@ -57,31 +76,17 @@ class Store:
         self._conn = duckdb.connect(db_path)
         self._conn.execute(_SCHEMA)
 
-    def insert_observation(self, row: dict) -> None:
+    def insert_observation(self, row: dict[str, Any]) -> None:
+        """Insert one observation; `row["ts"]` is stored as UTC."""
+        values = [
+            _naive_utc(row[column]) if column == "ts" else row[column]
+            for column in _OBSERVATION_COLUMNS
+        ]
         with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO observations
-                (ts, workload, replicas, request_rate, cpu_usage_pct, cpu_throttled_pct,
-                 memory_usage_mb, latency_p95_ms, error_rate, pending_pods, restarts)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    row["ts"],
-                    row["workload"],
-                    row["replicas"],
-                    row["request_rate"],
-                    row["cpu_usage_pct"],
-                    row["cpu_throttled_pct"],
-                    row["memory_usage_mb"],
-                    row["latency_p95_ms"],
-                    row["error_rate"],
-                    row["pending_pods"],
-                    row["restarts"],
-                ],
-            )
+            self._conn.execute(_INSERT, values)
 
     def recent_observations(self, workload: str, limit: int) -> pl.DataFrame:
+        """The newest `limit` observations for `workload`, sorted ascending by ts."""
         with self._lock:
             result = self._conn.execute(
                 """
@@ -94,8 +99,7 @@ class Store:
             ).pl()
         if result.is_empty():
             # DuckDB's arrow conversion drops column schema on a zero-row
-            # result, so an empty frame must be rebuilt with the known
-            # columns before any caller can safely .sort("ts") it.
+            # result; rebuild it so callers can still index known columns.
             return pl.DataFrame(schema={c: pl.Null for c in _OBSERVATION_COLUMNS})
         return result.sort("ts")
 

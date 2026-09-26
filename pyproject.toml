@@ -41,7 +41,7 @@ dev = [
 ]
 
 [tool.ruff]
-line-length = 100
+line-length = 88
 target-version = "py314"
 
 [tool.black]
@@ -64,7 +64,6 @@ check_untyped_defs = true
 [[tool.mypy.overrides]]
 module = ["ConfigSpace", "ConfigSpace.*", "smac"]
 ignore_missing_imports = true
-no_implicit_optional = true
 
 [[tool.mypy.overrides]]
 module = [

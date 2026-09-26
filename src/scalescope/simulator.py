@@ -13,6 +13,7 @@ import math
 import random
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,8 @@ TARGET_CPU_UTILIZATION = 0.60
 MIN_REPLICAS = 3
 MAX_REPLICAS = 30
 BASE_LATENCY_MS = 25.0
+BASE_MEMORY_MB = 180.0
+FAULTS = ("traffic_spike", "memory_leak", "cpu_limit", "node_capacity")
 
 
 @dataclass
@@ -30,7 +33,7 @@ class WorkloadState:
     name: str = "sample-app"
     replicas: int = 8
     memory_leak_mb_per_tick: float = 0.0
-    memory_baseline_mb: float = 180.0
+    memory_baseline_mb: float = BASE_MEMORY_MB
     cpu_limit_constrained: bool = False
     node_capacity_constrained: bool = False
     tick: int = 0
@@ -53,6 +56,12 @@ class WorkloadSimulator:
         spike = 600 if self.state.active_fault == "traffic_spike" else 0
         return max(50.0, daily + noise + spike)
 
+    def _clear_fault(self) -> None:
+        self.state.active_fault = None
+        self.state.memory_leak_mb_per_tick = 0.0
+        self.state.cpu_limit_constrained = False
+        self.state.node_capacity_constrained = False
+
     def _start_fault(self, fault: str, duration_ticks: int) -> None:
         self.state.active_fault = fault
         self.state.fault_ticks_remaining = duration_ticks
@@ -69,22 +78,14 @@ class WorkloadSimulator:
             return
         if self.state.rng.random() > 0.01:
             return
-        fault = self.state.rng.choice(
-            ["traffic_spike", "memory_leak", "cpu_limit", "node_capacity"]
-        )
+        fault = self.state.rng.choice(FAULTS)
         self._start_fault(fault, self.state.rng.randint(60, 180))
 
     def trigger_fault(self, fault: str, duration_ticks: int = 60) -> None:
-        """Manually start `fault` now, overriding any fault already running.
-
-        `fault` must be one of traffic_spike/memory_leak/cpu_limit/node_capacity.
-        """
-        if fault not in ("traffic_spike", "memory_leak", "cpu_limit", "node_capacity"):
+        """Manually start `fault` (one of `FAULTS`) now, replacing any running fault."""
+        if fault not in FAULTS:
             raise ValueError(f"unknown fault: {fault}")
-        self.state.active_fault = None
-        self.state.memory_leak_mb_per_tick = 0.0
-        self.state.cpu_limit_constrained = False
-        self.state.node_capacity_constrained = False
+        self._clear_fault()
         self._start_fault(fault, duration_ticks)
 
     def _maybe_end_fault(self) -> None:
@@ -94,10 +95,7 @@ class WorkloadSimulator:
         if self.state.fault_ticks_remaining > 0:
             return
         logger.info("fault ended: %s", self.state.active_fault)
-        self.state.active_fault = None
-        self.state.memory_leak_mb_per_tick = 0.0
-        self.state.cpu_limit_constrained = False
-        self.state.node_capacity_constrained = False
+        self._clear_fault()
 
     def _reactive_hpa(self, cpu_utilization: float) -> tuple[int, int]:
         """Reactive controller: mimics Kubernetes HPA scaling on CPU target.
@@ -118,7 +116,7 @@ class WorkloadSimulator:
                 new_replicas = max_schedulable
         return new_replicas, pending
 
-    def step(self) -> dict:
+    def step(self) -> dict[str, Any]:
         """Advance simulation by one tick and return one observation row."""
         self.state.tick += 1
         self._maybe_start_fault()
@@ -155,7 +153,7 @@ class WorkloadSimulator:
 
         restarts = 1 if memory_usage_mb > 900 else 0
         if restarts:
-            self.state.memory_baseline_mb = 180.0
+            self.state.memory_baseline_mb = BASE_MEMORY_MB
 
         new_replicas, pending_pods = self._reactive_hpa(utilization_per_pod)
         current_replicas = self.state.replicas

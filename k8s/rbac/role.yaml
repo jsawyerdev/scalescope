@@ -16,10 +16,11 @@ rules:
   # Write surface for actuation (SCALESCOPE_ACTUATE=true only): scoped to
   # the scale subresource, not full deployments, so this identity can
   # change replica counts and nothing else about the workload (no image,
-  # env, volume, or spec changes).
+  # env, volume, or spec changes). Only `patch`: k8s_actuator.py never
+  # issues a full `update` of the scale object.
   - apiGroups: ["apps"]
     resources: ["deployments/scale"]
-    verbs: ["patch", "update"]
+    verbs: ["patch"]
   # Read-only: k8s_actuator.py checks for a competing HorizontalPodAutoscaler
   # before writing, since two controllers writing the same Deployment's
   # replica count fight each other.

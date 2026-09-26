@@ -22,7 +22,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from multiprocessing.synchronize import Event as MultiprocessingEvent
 
@@ -49,16 +49,16 @@ _STRESS_PI_DIGITS = 500
 _STRESS_WORKERS = 1
 _STRESS_PHASE = "manual_cpu_stress"
 
-# Plain instantaneous gauges (not counters needing PromQL rate()) so a
-# simple text scrape can read them directly - see
-# src/scalescope/k8s_collector.py's `_scrape_workload_metrics`. Renaming
-# these breaks that contract; keep the two in sync if either changes.
 REQUEST_COUNT = Counter(
     "sample_workload_requests_total", "Total HTTP requests", ["path", "status"]
 )
 REQUEST_LATENCY = Histogram(
     "sample_workload_request_duration_seconds", "Request duration in seconds", ["path"]
 )
+# Plain instantaneous gauges (not counters needing PromQL rate()) so a
+# simple text scrape can read them directly - see
+# src/scalescope/k8s_collector.py's `_SCRAPED_GAUGE_NAMES`. Renaming these
+# three breaks that contract; keep the two in sync if either changes.
 DEMAND_RPS = Gauge("sample_workload_demand_rps", "Current simulated request rate")
 LATENCY_P95_MS = Gauge(
     "sample_workload_latency_p95_ms", "Rolling p95 request latency, ms"
@@ -82,12 +82,10 @@ _leak_buffer: bytearray = bytearray()
 def _record_outcome(latency_ms: float, is_error: bool) -> None:
     _recent_latencies_ms.append(latency_ms)
     _recent_outcomes.append(is_error)
-    if _recent_latencies_ms:
-        ordered = sorted(_recent_latencies_ms)
-        p95_index = min(len(ordered) - 1, int(len(ordered) * 0.95))
-        LATENCY_P95_MS.set(ordered[p95_index])
-    if _recent_outcomes:
-        ERROR_RATE.set(sum(_recent_outcomes) / len(_recent_outcomes))
+    ordered = sorted(_recent_latencies_ms)
+    p95_index = min(len(ordered) - 1, int(len(ordered) * 0.95))
+    LATENCY_P95_MS.set(ordered[p95_index])
+    ERROR_RATE.set(sum(_recent_outcomes) / len(_recent_outcomes))
 
 
 def _burn_cpu(iterations: int) -> str:
@@ -152,8 +150,12 @@ _TRIGGER_PHASES = {
     "traffic": _LoadPhase("manual_traffic_spike", 0, (520, 700), 0.02, 0),
 }
 
+# A /trigger override is read from the event loop and from stress-run
+# threads (_finish_stress_run/_stop_stress_run), so both fields change
+# together under _override_lock.
 _manual_override: _LoadPhase | None = None
 _manual_override_until: float = 0.0
+_override_lock = threading.Lock()
 _timeline_lock = threading.Lock()
 _timeline_paused = False
 _timeline_paused_since: float | None = None
@@ -162,7 +164,7 @@ _stress_lock = threading.Lock()
 
 
 class _StressRun:
-    """One bounded all-core CPU stress run."""
+    """One bounded CPU stress run of `_STRESS_WORKERS` worker processes."""
 
     def __init__(
         self,
@@ -193,10 +195,11 @@ def _base_phase(now: float) -> _LoadPhase:
 
 def _current_phase(now: float) -> _LoadPhase:
     global _manual_override
-    if _manual_override is not None:
-        if now < _manual_override_until:
-            return _manual_override
-        _manual_override = None
+    with _override_lock:
+        if _manual_override is not None:
+            if now < _manual_override_until:
+                return _manual_override
+            _manual_override = None
 
     with _timeline_lock:
         if _timeline_paused and _timeline_paused_phase is not None:
@@ -280,11 +283,8 @@ def _compute_pi_digits(digits: int) -> str:
 
 
 def _stress_worker(stop_event: MultiprocessingEvent, digits: int) -> None:
-    checksum = 0
     while not stop_event.is_set():
-        checksum ^= hash(_compute_pi_digits(digits))
-    if checksum == -1:
-        logger.debug("unreachable stress checksum guard")
+        _compute_pi_digits(digits)
 
 
 def _join_stress_processes(processes: list[multiprocessing.Process]) -> None:
@@ -406,9 +406,13 @@ async def _load_simulator() -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     task = asyncio.create_task(_load_simulator())
     logger.info("self-load simulator started, tick=%.1fs", _TICK_SECONDS)
-    yield
-    _stop_stress_run()
-    task.cancel()
+    try:
+        yield
+    finally:
+        _stop_stress_run()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 app = FastAPI(title="scalescope-sample-workload", lifespan=lifespan)
@@ -487,11 +491,13 @@ async def trigger(
                 f"(expected one of {sorted([*_TRIGGER_PHASES, 'stress'])})"
             ),
         )
-    _manual_override = _TRIGGER_PHASES[kind]
-    _manual_override_until = time.time() + duration_seconds
+    phase = _TRIGGER_PHASES[kind]
+    with _override_lock:
+        _manual_override = phase
+        _manual_override_until = time.time() + duration_seconds
     logger.info("manual trigger: kind=%s duration=%ds", kind, duration_seconds)
     return {
         "kind": kind,
-        "phase": _manual_override.name,
+        "phase": phase.name,
         "duration_seconds": duration_seconds,
     }

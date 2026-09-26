@@ -28,12 +28,11 @@ from scalescope.k8s_collector import (
 from scalescope.logging_config import configure_logging
 from scalescope.models.statsforecast_model import AutoEtsModel
 from scalescope.simulator import WorkloadSimulator
+from scalescope.state import app_state
 from scalescope.storage import Store
 
 configure_logging()
 logger = logging.getLogger(__name__)
-
-app_state: dict[str, Any] = {}
 
 
 def _init_source_state() -> dict[str, Any]:
@@ -104,7 +103,7 @@ def _actuate(
     if df.is_empty():
         return
 
-    diag = diagnose(df.tail(30))
+    diag = diagnose(df)
     if not diag.scaling_will_help:
         source["last_actuation_error"] = f"skipped: {diag.explanation}"
         return
@@ -228,29 +227,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app_state["store"] = store
     app_state["source"] = _init_source_state()
 
-    task: asyncio.Task | None = None
     if settings.mode == "demo":
         task = asyncio.create_task(_simulation_loop(store))
-        task.add_done_callback(_record_background_failure)
         logger.info("demo simulation loop started")
-    elif settings.mode == "observe":
+    else:
         task = asyncio.create_task(_observe_loop(store))
-        task.add_done_callback(_record_background_failure)
         logger.info(
             "observe loop started for %s/%s",
             settings.k8s_namespace,
             settings.k8s_deployment,
         )
-    else:
-        raise RuntimeError(f"unsupported ScaleScope mode: {settings.mode}")
+    task.add_done_callback(_record_background_failure)
 
     try:
         yield
     finally:
-        if task is not None:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
         store.close()
 
 
