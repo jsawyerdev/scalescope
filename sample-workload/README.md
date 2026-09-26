@@ -51,48 +51,19 @@ Routes:
   the default 3-replica deployment so a sustained demo produces visible
   scale-up recommendations.
 
-## Build the image
-
-```
-docker build -t scalescope-sample-workload:latest sample-workload/
-```
-
-## Load it into a cluster
-
-**Local dev cluster (kind/k3d)** - load the image directly, no registry
-needed:
-
-```
-kind load docker-image scalescope-sample-workload:latest
-# or
-k3d image import scalescope-sample-workload:latest
-```
-
-**Any other cluster reached via `kubectl`** (a managed cluster, a bare-metal
-cluster, a homelab cluster) - kind/k3d's image-load shortcut doesn't apply.
-Push the image to a registry that cluster can pull from, then point the
-Deployment at it. The checked-in manifest is set to this repo's live demo
-registry; replace it with yours before applying in another cluster:
-
-```
-docker tag scalescope-sample-workload:latest <your-registry>/scalescope-sample-workload:latest
-docker push <your-registry>/scalescope-sample-workload:latest
-```
-
-Then edit `k8s/deployment.yaml` and replace the `image:` value with
-`<your-registry>/scalescope-sample-workload:latest`. Keep
-`imagePullPolicy: Always` if using a mutable tag. Any registry your cluster's
-nodes can reach works - a cloud registry (ECR/GCR/Docker Hub) or a
-self-hosted one already running in your cluster.
-
 ## Deploy
 
-Not run as part of building these files - apply manually once the image
-reference is set:
+The image is published (amd64/arm64) as
+`ghcr.io/jsawyerdev/scalescope-sample-workload`, so no build is needed:
 
 ```
-kubectl apply -f sample-workload/k8s/
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//sample-workload/k8s?ref=v0.13.0"
+# or, from a clone:
+kubectl apply -k sample-workload/k8s
 ```
+
+To build it yourself instead: `docker build -t <your-registry>/scalescope-sample-workload sample-workload/`,
+push it, and point the Deployment at it with a kustomize overlay.
 
 This creates the `scalescope-demo` namespace, a 3-replica Deployment (CPU
 request 100m / limit 200m, memory request 64Mi / limit 128Mi - deliberately
@@ -106,16 +77,11 @@ Requires a metrics-server (or equivalent) in the cluster for the HPA to read
 CPU utilization; most clusters, including a standard Talos setup, already
 run one.
 
-**Live-cluster drift note**: the demo cluster this repo was built against
-currently differs from a fresh `kubectl apply` of these manifests - the
-Service was patched to `LoadBalancer` (`kubectl patch svc sample-workload
--n scalescope-demo -p '{"spec":{"type":"LoadBalancer"}}'`) for a stable
-metrics/`/trigger` address instead of a fragile `kubectl port-forward`,
-and the HPA was deleted (`kubectl delete hpa sample-workload -n
-scalescope-demo`) so ScaleScope's actuator isn't refused by the
-HPA-conflict check - see the main README's "Actuation" section. A fresh
-`kubectl apply -f sample-workload/k8s/` restores `ClusterIP` and the HPA,
-which will then compete with actuation until the HPA is removed again.
+To let ScaleScope actuate this workload, delete its HPA first
+(`kubectl delete hpa sample-workload -n scalescope-demo`): ScaleScope refuses
+to compete with another controller. See
+[examples/README.md](../examples/README.md) section 7 for connecting it to
+ScaleScope.
 
 ## Watch it react
 

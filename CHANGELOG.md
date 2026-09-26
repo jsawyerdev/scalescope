@@ -4,6 +4,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.13.0]
+
+### Changed
+
+- The dashboard leads with the answer: a traffic-light status (is anything
+  wrong?), a plain-language recommendation ("Add 1 pod now: 14 → 15") with
+  its reason and the four numbers behind it, and a demand chart over a pod
+  strip (running now vs needed for the busy case). Statistical terms moved to
+  tooltips; model comparison, replay, raw data, and cluster identity moved
+  under a collapsed "Engineering details". Light theme, straight lines,
+  blues with orange for the busy case.
+- The dashboard defaults to the model actuation uses (`auto_ets`), from one
+  shared registry (`scalescope.models.registry`), so it shows exactly what
+  the autoscaler would do; it previously defaulted to `ewma`, which could
+  disagree with actuation.
+- Recommendations report `hold_reason` (why the count is held),
+  `pods_needed` per forecast step, `startup_lead_steps`, and
+  `target_utilization`; `/api/source` reports `actuation_model`.
+- The chart shows three forecast horizons of history, so the forecast gets a
+  readable share of the axis, and no longer refetches every other model's
+  forecast every 12 seconds.
+- Chart.js 4.5.1 is vendored (byte-identical to the previously pinned CDN
+  file), so the dashboard works on clusters without internet access.
+
 ## [0.12.0]
 
 ### Added

@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scalescope.main import app, app_state
+from scalescope.models.registry import ACTUATION_MODEL
 from scalescope.storage import Store
 
 _MODEL_NAMES = [
@@ -170,7 +171,7 @@ def test_unknown_model_returns_400(
 
 
 @pytest.mark.parametrize("path_suffix", ["forecast", "recommendation"])
-def test_default_model_is_ewma(
+def test_default_model_is_the_actuation_model(
     client: TestClient, store: Store, path_suffix: str
 ) -> None:
     workload = _workload_name()
@@ -178,7 +179,7 @@ def test_default_model_is_ewma(
 
     resp = client.get(f"/api/workloads/{workload}/{path_suffix}")
     assert resp.status_code == 200
-    assert resp.json()["model"] == "ewma"
+    assert resp.json()["model"] == ACTUATION_MODEL == "auto_ets"
 
 
 # --- limit validation ---------------------------------------------------------
@@ -421,3 +422,20 @@ def test_forecast_cache_is_bounded(
         assert client.get(f"/api/workloads/{workload}/forecast").status_code == 200
 
     assert len(routes._forecast_cache) <= 2
+
+
+def test_recommendation_explains_itself_for_the_dashboard(
+    client: TestClient, store: Store
+) -> None:
+    workload = _workload_name()
+    seed_observations(store, workload, 40)
+
+    source = client.get("/api/source").json()
+    rec = client.get(f"/api/workloads/{workload}/recommendation").json()
+
+    assert source["actuation_model"] == rec["model"] == ACTUATION_MODEL
+    assert rec["hold_reason"] is None
+    assert rec["startup_lead_steps"] > 0
+    assert rec["target_utilization"] == pytest.approx(0.7)
+    assert len(rec["pods_needed"]) == 30
+    assert all(isinstance(n, int) and n >= 1 for n in rec["pods_needed"])

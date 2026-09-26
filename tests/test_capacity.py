@@ -155,3 +155,35 @@ def test_stabilizer_with_no_window_passes_recommendations_through() -> None:
     stabilizer = ScaleDownStabilizer(window_seconds=0)
     assert stabilizer.stabilize(0, current=5, recommended=8) == 8
     assert stabilizer.stabilize(1, current=8, recommended=4) == 4
+
+
+def test_hold_reasons_explain_an_unchanged_count() -> None:
+    rising = _forecast([5000.0] * 10)
+    uncertain = Forecast("x", np.zeros(10), np.full(10, 5000.0), np.full(10, 5000.0))
+    unknown = PodCapacity(None, "unavailable")
+
+    assert recommend_replicas(3, rising, _CAPACITY, _POLICY, 9).hold_reason is None
+    assert (
+        recommend_replicas(
+            3, rising, _CAPACITY, _POLICY, 9, scaling_will_help=False
+        ).hold_reason
+        == "diagnosis"
+    )
+    assert (
+        recommend_replicas(3, rising, unknown, _POLICY, 9).hold_reason
+        == "capacity_unknown"
+    )
+    assert (
+        recommend_replicas(3, uncertain, _CAPACITY, _POLICY, 9).hold_reason
+        == "low_confidence"
+    )
+
+
+def test_pods_needed_follows_the_p90_forecast() -> None:
+    per_pod = 220.0 * _POLICY.target_utilization
+    # p90 is 1.2x p50 here: 1.5 and 4.5 pods' worth of busy-case demand.
+    forecast = _forecast([per_pod * 1.5 / 1.2, per_pod * 4.5 / 1.2])
+    rec = recommend_replicas(3, forecast, _CAPACITY, _POLICY)
+    assert rec.pods_needed == [2, 5]
+    unknown = recommend_replicas(3, forecast, PodCapacity(None, "unavailable"), _POLICY)
+    assert unknown.pods_needed is None

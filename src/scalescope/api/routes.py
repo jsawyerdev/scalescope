@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import threading
 from datetime import UTC, datetime
 from importlib.metadata import version as _package_version
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -23,19 +21,8 @@ from scalescope.config import settings
 from scalescope.demand import DemandSignal, demand_history, demand_signal
 from scalescope.diagnosis import DIAGNOSIS_WINDOW_STEPS, DiagnosisResult, diagnose
 from scalescope.k8s_collector import workload_id
-from scalescope.models.base import Forecast, ForecastModel
-from scalescope.models.baselines import (
-    EwmaModel,
-    LinearTrendModel,
-    NaiveModel,
-    SeasonalNaiveModel,
-)
-from scalescope.models.lightgbm_model import (
-    LightGbmHyperparameters,
-    LightGbmQuantileModel,
-    validate_lightgbm_hyperparameters,
-)
-from scalescope.models.statsforecast_model import AutoEtsModel
+from scalescope.models.base import Forecast
+from scalescope.models.registry import ACTUATION_MODEL, MODELS
 from scalescope.replay import REPLAY_MAX_OBSERVATIONS, REPLAY_MIN_HISTORY, replay_score
 from scalescope.state import app_state
 from scalescope.storage import Store
@@ -43,48 +30,6 @@ from scalescope.storage import Store
 router = APIRouter(prefix="/api")
 
 
-def _load_lightgbm_config(path: str | None) -> LightGbmHyperparameters:
-    if not path:
-        return {}
-
-    config_path = Path(path)
-    try:
-        with config_path.open(encoding="utf-8") as f:
-            raw_config = json.load(f)
-    except FileNotFoundError as exc:
-        raise RuntimeError(
-            "SCALESCOPE_LIGHTGBM_CONFIG_PATH points to a missing file: "
-            f"{config_path}"
-        ) from exc
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            "SCALESCOPE_LIGHTGBM_CONFIG_PATH must contain valid JSON: "
-            f"{config_path}: {exc}"
-        ) from exc
-    except OSError as exc:
-        raise RuntimeError(
-            f"SCALESCOPE_LIGHTGBM_CONFIG_PATH could not be read: {config_path}: {exc}"
-        ) from exc
-
-    try:
-        return validate_lightgbm_hyperparameters(
-            raw_config, source="SCALESCOPE_LIGHTGBM_CONFIG_PATH"
-        )
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(str(exc)) from exc
-
-
-_MODELS: dict[str, ForecastModel] = {
-    "naive": NaiveModel(),
-    "seasonal_naive": SeasonalNaiveModel(),
-    "ewma": EwmaModel(),
-    "linear_trend": LinearTrendModel(),
-    "auto_ets": AutoEtsModel(),
-    "lightgbm_quantile": LightGbmQuantileModel(
-        **_load_lightgbm_config(settings.lightgbm_config_path)
-    ),
-}
-_DEFAULT_MODEL = "ewma"
 _HORIZON_STEPS = settings.forecast_horizon_steps
 _HISTORY_STEPS = settings.history_window_steps
 _MAX_OBSERVATIONS_LIMIT = 5000
@@ -124,6 +69,7 @@ def get_source() -> dict[str, Any]:
                 or f"last successful collection is stale ({int(age_seconds)}s old)"
             )
     source["version"] = _VERSION
+    source["actuation_model"] = ACTUATION_MODEL
     return source
 
 
@@ -146,7 +92,7 @@ def _get_forecast(
         cached = _forecast_cache.get(cache_key)
         if cached is not None and cached[0] == latest_ts:
             return cached[1]
-    forecast = _MODELS[model].predict(history, _HORIZON_STEPS)
+    forecast = MODELS[model].predict(history, _HORIZON_STEPS)
     with _forecast_cache_lock:
         _forecast_cache.pop(cache_key, None)
         _forecast_cache[cache_key] = (latest_ts, forecast)
@@ -178,8 +124,8 @@ def get_observations(
 
 
 @router.get("/workloads/{workload}/forecast")
-def get_forecast(workload: str, model: str = _DEFAULT_MODEL) -> dict[str, Any]:
-    if model not in _MODELS:
+def get_forecast(workload: str, model: str = ACTUATION_MODEL) -> dict[str, Any]:
+    if model not in MODELS:
         raise HTTPException(status_code=400, detail=f"unknown model: {model}")
     df = _recent_observations_or_404(workload, _HISTORY_STEPS)
     signal = demand_signal(df)
@@ -234,6 +180,10 @@ def _compute_recommendation(
         "demand_signal": signal,
         "capacity_per_pod": rec.capacity.per_pod,
         "capacity_source": rec.capacity.source,
+        "target_utilization": settings.target_utilization,
+        "hold_reason": rec.hold_reason,
+        "pods_needed": rec.pods_needed,
+        "startup_lead_steps": STARTUP_LEAD_STEPS,
         "scaling_will_help": diag.scaling_will_help,
         "diagnosis": diag.diagnosis.value,
         "explanation": diag.explanation,
@@ -241,8 +191,8 @@ def _compute_recommendation(
 
 
 @router.get("/workloads/{workload}/recommendation")
-def get_recommendation(workload: str, model: str = _DEFAULT_MODEL) -> dict[str, Any]:
-    if model not in _MODELS:
+def get_recommendation(workload: str, model: str = ACTUATION_MODEL) -> dict[str, Any]:
+    if model not in MODELS:
         raise HTTPException(status_code=400, detail=f"unknown model: {model}")
     df = _recent_observations_or_404(workload, _HISTORY_STEPS)
     return _compute_recommendation(workload, model, df, _diagnose(df))
@@ -260,7 +210,7 @@ def get_all_recommendations(workload: str) -> dict[str, Any]:
         "explanation": diag.explanation,
         "models": [
             _compute_recommendation(workload, model_name, df, diag)
-            for model_name in _MODELS
+            for model_name in MODELS
         ],
     }
 
@@ -278,7 +228,7 @@ def get_replay(workload: str) -> dict[str, Any]:
     signal = demand_signal(df)
     history = demand_history(df, signal)
     scores = replay_score(
-        history, _MODELS, min_history=REPLAY_MIN_HISTORY, horizon=_HORIZON_STEPS
+        history, MODELS, min_history=REPLAY_MIN_HISTORY, horizon=_HORIZON_STEPS
     )
     return {
         "workload": workload,
