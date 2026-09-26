@@ -50,3 +50,9 @@ def test_seasonal_naive_falls_back_without_detected_period() -> None:
     history = np.full(400, 250.0)
     forecast = SeasonalNaiveModel().predict(history, horizon=3)
     assert forecast.model_name == "naive"
+
+
+def test_single_observation_still_gets_a_nonzero_band() -> None:
+    forecast = NaiveModel().predict(np.array([500.0]), horizon=3)
+    assert np.all(forecast.p90 > forecast.p50)
+    assert np.all(forecast.p10 < forecast.p50)
