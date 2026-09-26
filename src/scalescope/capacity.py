@@ -37,6 +37,8 @@ _ESTIMATE_MAX_CPU_PCT = 95.0
 _MIN_ESTIMATE_SAMPLES = 10
 
 CapacitySource = Literal["configured", "estimated", "cpu_request", "unavailable"]
+# Why a recommendation keeps the current count even if demand says otherwise.
+HoldReason = Literal["diagnosis", "capacity_unknown", "low_confidence"]
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,9 @@ class CapacityRecommendation:
     projected_utilization: float | None
     confidence: float
     capacity: PodCapacity
+    hold_reason: HoldReason | None
+    # Pods the p90 forecast needs at each horizon step; None without capacity.
+    pods_needed: list[int] | None
 
 
 def estimate_capacity_per_pod(observations: pl.DataFrame) -> float | None:
@@ -147,24 +152,31 @@ def recommend_replicas(
     )
     confidence = max(0.0, min(1.0, 1 - (band_width / max(peak_demand, 1.0))))
 
+    hold_reason: HoldReason | None = None
+    if not scaling_will_help:
+        hold_reason = "diagnosis"
+    elif capacity.per_pod is None:
+        hold_reason = "capacity_unknown"
+    elif confidence < MIN_CONFIDENCE_TO_SCALE:
+        hold_reason = "low_confidence"
+
     recommended = current_replicas
-    if (
-        capacity.per_pod is not None
-        and scaling_will_help
-        and confidence >= MIN_CONFIDENCE_TO_SCALE
-    ):
+    pods_needed: list[int] | None = None
+    if capacity.per_pod is not None:
         safe_capacity_per_pod = capacity.per_pod * policy.target_utilization
 
         def pods_for(demand: float) -> int:
             required = math.ceil(demand / safe_capacity_per_pod)
             return max(policy.min_replicas, min(policy.max_replicas, required))
 
-        scale_up_to = pods_for(lead_peak)
-        hold_at = pods_for(peak_demand)
-        if scale_up_to > current_replicas:
-            recommended = min(scale_up_to, current_replicas + MAX_SCALE_UP_PER_STEP)
-        elif hold_at < current_replicas:
-            recommended = max(hold_at, current_replicas - MAX_SCALE_DOWN_PER_STEP)
+        pods_needed = [pods_for(float(demand)) for demand in forecast.p90]
+        if hold_reason is None:
+            scale_up_to = pods_for(lead_peak)
+            hold_at = pods_for(peak_demand)
+            if scale_up_to > current_replicas:
+                recommended = min(scale_up_to, current_replicas + MAX_SCALE_UP_PER_STEP)
+            elif hold_at < current_replicas:
+                recommended = max(hold_at, current_replicas - MAX_SCALE_DOWN_PER_STEP)
 
     projected_utilization = (
         peak_demand / (recommended * capacity.per_pod)
@@ -179,6 +191,8 @@ def recommend_replicas(
         projected_utilization=projected_utilization,
         confidence=round(confidence, 3),
         capacity=capacity,
+        hold_reason=hold_reason,
+        pods_needed=pods_needed,
     )
 
 

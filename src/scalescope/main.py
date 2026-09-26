@@ -33,7 +33,7 @@ from scalescope.k8s_collector import (
     workload_id,
 )
 from scalescope.logging_config import configure_logging
-from scalescope.models.statsforecast_model import AutoEtsModel
+from scalescope.models.registry import ACTUATION_MODEL, MODELS
 from scalescope.simulator import WorkloadSimulator
 from scalescope.state import app_state
 from scalescope.storage import Store
@@ -149,7 +149,7 @@ def _actuate(
     # spec.replicas, not status: status lags a scale write by many seconds,
     # and planning from it would apply the same step twice.
     current_replicas = int(df["desired_replicas"][-1])
-    forecast = AutoEtsModel().predict(
+    forecast = MODELS[ACTUATION_MODEL].predict(
         demand_history(df, signal), settings.forecast_horizon_steps
     )
     recommended = stabilizer.stabilize(

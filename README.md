@@ -6,7 +6,7 @@ runs that alongside a deterministic diagnosis engine that flags when scaling is
 the wrong response (CPU limit throttling, memory leak, node capacity exhaustion,
 HPA ceiling, non-CPU bottleneck).
 
-## Status: v0.12.0 (deploy to any cluster with metrics-server; forecasts request rate or total CPU; opt-in actuation; replay lab scores the p90 that sizes replicas)
+## Status: v0.13.0 (deploy to any cluster with metrics-server; forecasts request rate or total CPU; a plain-language dashboard that shows exactly what the autoscaler would do)
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed at each version.
 
@@ -78,39 +78,54 @@ ServiceAccount can read. To narrow the scope, see
 
 ## Screenshots
 
-All three captured from a real running DEMO instance (`docker compose up --build`,
-no cluster involved) against the built-in `sample-app` synthetic workload.
+All three captured from a real running DEMO instance (no cluster involved)
+against the built-in `sample-app` synthetic workload.
 
 ### The dashboard
 
-![ScaleScope dashboard: diagnosis, cluster/source panel, latest observation,
-predictive ramp, and side-by-side model comparison](docs/screenshots/hero-dashboard.png)
+![ScaleScope dashboard: a traffic-light status, a plain-language recommendation
+with the numbers behind it, and the demand and pod forecasts](docs/screenshots/hero-dashboard.png)
 
-Diagnosis and data freshness up top, then cluster/source identity, the latest
-raw observation, the predictive ramp table for the selected model, and all six
-forecast models recommending replicas from the same evidence so no single
-model's output is taken on faith.
+The page answers three questions in order:
+
+1. **Is everything OK?** A traffic light: green when the current pods cover
+   the forecast, amber when a change is recommended or data is slow, red when
+   collection has stopped or scaling would not fix the problem.
+2. **What would the autoscaler do?** A plain sentence ("Add 1 pod now: 14 →
+   15"), why, and the four numbers behind it: demand now, the busy-case peak
+   (p90) ahead, what one pod handles, and pods needed at the peak. It always
+   uses the model actuation uses, and says whether autoscaling is on or the
+   page is advisory only.
+3. **What is coming?** Recent demand with the forecast's expected line,
+   likely range, and busy case, over a pod strip showing pods running now and
+   pods the busy case needs.
+
+Model comparison, the replay lab, raw observations, and cluster identity sit
+under a collapsed "Engineering details" section.
 
 ### Diagnosis catching a real problem
 
-![Diagnosis engine showing POSSIBLE_MEMORY_LEAK after clicking the Leak Memory
-load-test button, with the sidebar's active-trigger countdown](docs/screenshots/diagnosis-memory-leak.png)
+![The status turns red: scaling will not fix a probable memory leak, so the
+recommendation holds the pod count](docs/screenshots/diagnosis-memory-leak.png)
 
-Clicking "Leak Memory" in the sidebar forces the DEMO simulator's memory-leak
-fault; within a few ticks `diagnosis.py`'s rule engine (never a model) flags
-`POSSIBLE_MEMORY_LEAK` and sets `scaling_will_help=false` — memory is growing
-while traffic is flat, so adding replicas would mask the leak, not fix it.
+Clicking "Leak memory" forces the DEMO simulator's memory-leak fault; within a
+few ticks `diagnosis.py`'s rule engine (never a model) flags
+`POSSIBLE_MEMORY_LEAK`: memory is growing while traffic is flat, so adding
+pods would mask the leak, not fix it. The status turns red and the
+recommendation holds the pod count instead of asking for more.
 
 ### Replay lab
 
 ![Replay lab table: every forecast model backtested against this workload's
 own recorded history](docs/screenshots/replay-lab.png)
 
-`GET /api/workloads/{name}/replay`, triggered by the dashboard's "Run Replay"
-button, backtests every registered model against this workload's own recorded
-history — p90 pinball loss and coverage (what sizes replicas) plus MAE/MAPE,
-sorted best-first by p90 loss — measured accuracy, not a stated preference for
-which model to trust. (The screenshot predates the p90 columns.)
+`GET /api/workloads/{name}/replay`, triggered by "Run replay" under
+Engineering details, backtests every registered model against this
+workload's own recorded history: busy-case (p90) pinball loss and coverage,
+which is what sizes pods, plus the expected forecast's MAE/MAPE, sorted best
+first by p90 loss. On the short, fault-heavy history in this screenshot the
+naive baseline ranks first, which is the point of measuring instead of
+assuming.
 
 ## Advisory or autoscaling?
 
@@ -483,10 +498,11 @@ environments where ScaleScope is authorized to change replica counts.
 
 ### What the dashboard fetches, and when
 
-`static/app.js`'s `refresh()` runs every `POLL_INTERVAL_MS` (3s); the
-5 non-selected models' forecasts are only refetched every 12s to avoid
-firing 6 forecast requests on every 3s tick. Replay and load triggers are
-explicit button actions, never polled:
+`static/app.js`'s `refresh()` runs every `POLL_INTERVAL_MS` (3s) and fetches
+only the selected model's forecast; the recommendations call already carries
+every model's replica decision. Replay and load triggers are explicit button
+actions, never polled. Chart.js is vendored under `static/vendor/`, so the
+dashboard needs no internet access:
 
 ```mermaid
 sequenceDiagram
@@ -494,11 +510,9 @@ sequenceDiagram
     participant API as FastAPI /api/*
 
     loop every 3s
-        Browser->>API: GET /observations, /recommendations,<br/>/forecast?model=selected, /source
+        Browser->>API: GET /observations, /recommendations, /source
         API-->>Browser: JSON
-    end
-    loop every 12s
-        Browser->>API: GET /forecast?model=X for each<br/>non-selected model
+        Browser->>API: GET /forecast?model=selected
         API-->>Browser: JSON
     end
     Note over Browser,API: on button click only — not polled
@@ -743,7 +757,8 @@ ScaleScope is licensed under the Apache License 2.0. Copyright 2026 James
 Sawyer. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 The bundled DejaVu Sans Mono Regular font keeps its own license in
-`src/scalescope/static/fonts/DejaVu-LICENSE.txt`.
+`src/scalescope/static/fonts/DejaVu-LICENSE.txt`, and the vendored Chart.js
+4.5.1 (MIT) in `src/scalescope/static/vendor/Chart.js-LICENSE.md`.
 
 ## Concurrency and consistency
 
