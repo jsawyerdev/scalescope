@@ -24,11 +24,12 @@ import base64
 import binascii
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import httpx
 from kubernetes import client
@@ -67,21 +68,36 @@ def _parse_prometheus_gauges(text: str, names: set[str]) -> dict[str, float]:
         if not match or match.group(1) not in names:
             continue
         try:
-            values[match.group(1)] = float(match.group(2))
+            value = float(match.group(2))
         except ValueError:
             continue
+        # NaN/Inf would poison every forecast over the stored history window;
+        # treat them like an absent gauge.
+        if math.isfinite(value):
+            values[match.group(1)] = value
     return values
 
 
-_MEMORY_SUFFIXES = {
-    "Ki": 1024,
-    "Mi": 1024**2,
-    "Gi": 1024**3,
-    "Ti": 1024**4,
-    "K": 1000,
-    "M": 1000**2,
-    "G": 1000**3,
-    "T": 1000**4,
+# Kubernetes resource.Quantity suffixes. Binary suffixes are two characters
+# and must be matched before the one-character decimal ones.
+_BINARY_QUANTITY_SUFFIXES = {
+    "Ki": 1024.0,
+    "Mi": 1024.0**2,
+    "Gi": 1024.0**3,
+    "Ti": 1024.0**4,
+    "Pi": 1024.0**5,
+    "Ei": 1024.0**6,
+}
+_DECIMAL_QUANTITY_SUFFIXES = {
+    "n": 1e-9,
+    "u": 1e-6,
+    "m": 1e-3,
+    "k": 1e3,
+    "M": 1e6,
+    "G": 1e9,
+    "T": 1e12,
+    "P": 1e15,
+    "E": 1e18,
 }
 
 
@@ -138,30 +154,43 @@ def _service_account_subject(
     return subject if isinstance(subject, str) else None
 
 
-def _k8s_error_reason(exc: ApiException | Urllib3HTTPError) -> str:
+def k8s_error_reason(exc: ApiException | Urllib3HTTPError) -> str:
+    """The most specific human-readable reason a Kubernetes API call failed."""
     reason = getattr(exc, "reason", None)
     return str(reason) if reason else str(exc)
 
 
 def _raise_unavailable(context: str, exc: ApiException | Urllib3HTTPError) -> NoReturn:
-    raise KubernetesUnavailableError(f"{context}: {_k8s_error_reason(exc)}") from exc
+    raise KubernetesUnavailableError(f"{context}: {k8s_error_reason(exc)}") from exc
+
+
+def _parse_quantity(value: str) -> float:
+    """Parse a Kubernetes resource quantity (e.g. `250m`, `1.5Gi`, `2k`).
+
+    Raises ValueError for strings that are not a valid quantity.
+    """
+    for suffixes in (_BINARY_QUANTITY_SUFFIXES, _DECIMAL_QUANTITY_SUFFIXES):
+        for suffix, multiplier in suffixes.items():
+            if value.endswith(suffix):
+                return float(value[: -len(suffix)]) * multiplier
+    return float(value)
 
 
 def _parse_cpu_millicores(value: str) -> float:
-    if value.endswith("n"):
-        return float(value[:-1]) / 1_000_000
-    if value.endswith("u"):
-        return float(value[:-1]) / 1_000
-    if value.endswith("m"):
-        return float(value[:-1])
-    return float(value) * 1000
+    return _parse_quantity(value) * 1000
 
 
-def _parse_memory_bytes(value: str) -> float:
-    for suffix, multiplier in _MEMORY_SUFFIXES.items():
-        if value.endswith(suffix):
-            return float(value[: -len(suffix)]) * multiplier
-    return float(value)
+def _cpu_request_millicores(pods: list[Any]) -> float:
+    total = 0.0
+    for pod in pods:
+        for container in pod.spec.containers:
+            resource_requests = (
+                container.resources and container.resources.requests
+            ) or {}
+            cpu_request = resource_requests.get("cpu")
+            if cpu_request:
+                total += _parse_cpu_millicores(cpu_request)
+    return total
 
 
 def _label_selector(selector: object) -> str:
@@ -225,9 +254,7 @@ class KubernetesObservationCollector:
                             _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
                         ).items
                     )
-        except ApiException as exc:
-            _raise_unavailable("could not list observable deployments", exc)
-        except Urllib3HTTPError as exc:
+        except (ApiException, Urllib3HTTPError) as exc:
             _raise_unavailable("could not list observable deployments", exc)
 
         return sorted(
@@ -239,18 +266,19 @@ class KubernetesObservationCollector:
             if deployment.metadata.namespace and deployment.metadata.name
         )
 
-    def collect(self, target: KubernetesWorkloadTarget) -> dict:
+    def collect(self, target: KubernetesWorkloadTarget) -> dict[str, Any]:
+        """One observation row for `target`.
+
+        Raises KubernetesUnavailableError if the Deployment, its Pods, or
+        their metrics cannot be read or parsed.
+        """
         try:
             deployment = self._apps.read_namespaced_deployment(
                 target.deployment,
                 target.namespace,
                 _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
             )
-        except ApiException as exc:
-            _raise_unavailable(
-                f"deployment {target.namespace}/{target.deployment} unreachable", exc
-            )
-        except Urllib3HTTPError as exc:
+        except (ApiException, Urllib3HTTPError) as exc:
             _raise_unavailable(
                 f"deployment {target.namespace}/{target.deployment} unreachable", exc
             )
@@ -262,11 +290,7 @@ class KubernetesObservationCollector:
                 label_selector=label_selector,
                 _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
             ).items
-        except ApiException as exc:
-            _raise_unavailable(
-                f"pods for {target.namespace}/{target.deployment} unreachable", exc
-            )
-        except Urllib3HTTPError as exc:
+        except (ApiException, Urllib3HTTPError) as exc:
             _raise_unavailable(
                 f"pods for {target.namespace}/{target.deployment} unreachable", exc
             )
@@ -306,20 +330,8 @@ class KubernetesObservationCollector:
         raw = _parse_prometheus_gauges(response.text, set(_SCRAPED_GAUGE_NAMES))
         return {_SCRAPED_GAUGE_NAMES[name]: value for name, value in raw.items()}
 
-    def _cpu_request_millicores(self, pods: list) -> float:
-        total = 0.0
-        for pod in pods:
-            for container in pod.spec.containers:
-                resource_requests = (
-                    container.resources and container.resources.requests
-                ) or {}
-                cpu_request = resource_requests.get("cpu")
-                if cpu_request:
-                    total += _parse_cpu_millicores(cpu_request)
-        return total
-
     def _pod_resource_usage(
-        self, target: KubernetesWorkloadTarget, pods: list
+        self, target: KubernetesWorkloadTarget, pods: list[Any]
     ) -> tuple[float, float]:
         if not pods:
             return 0.0, 0.0
@@ -345,22 +357,25 @@ class KubernetesObservationCollector:
                 exc,
             )
 
-        usage_by_pod = {
-            item["metadata"]["name"]: item["containers"]
-            for item in metrics.get("items", [])
-        }
-        cpu_used_millicores = 0.0
-        memory_used_bytes = 0.0
-        for pod in pods:
-            for container_metrics in usage_by_pod.get(pod.metadata.name, []):
-                cpu_used_millicores += _parse_cpu_millicores(
-                    container_metrics["usage"]["cpu"]
-                )
-                memory_used_bytes += _parse_memory_bytes(
-                    container_metrics["usage"]["memory"]
-                )
+        try:
+            usage_by_pod = {
+                item["metadata"]["name"]: item["containers"]
+                for item in metrics.get("items", [])
+            }
+            cpu_used_millicores = 0.0
+            memory_used_bytes = 0.0
+            for pod in pods:
+                for container_metrics in usage_by_pod.get(pod.metadata.name, []):
+                    usage = container_metrics["usage"]
+                    cpu_used_millicores += _parse_cpu_millicores(usage["cpu"])
+                    memory_used_bytes += _parse_quantity(usage["memory"])
+            cpu_requested_millicores = _cpu_request_millicores(pods)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise KubernetesUnavailableError(
+                f"malformed pod metrics for {target.namespace}/{target.deployment}: "
+                f"{exc!r}"
+            ) from exc
 
-        cpu_requested_millicores = self._cpu_request_millicores(pods)
         cpu_usage_pct = (
             min(100.0, cpu_used_millicores / cpu_requested_millicores * 100)
             if cpu_requested_millicores

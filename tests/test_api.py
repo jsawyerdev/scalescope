@@ -140,6 +140,7 @@ _WORKLOAD_ENDPOINTS = [
     "/api/workloads/{w}/diagnosis",
     "/api/workloads/{w}/recommendation",
     "/api/workloads/{w}/recommendations",
+    "/api/workloads/{w}/replay",
 ]
 
 
@@ -206,19 +207,6 @@ def test_limit_over_cap_returns_422(client: TestClient, store: Store) -> None:
     seed_observations(store, workload, 5)
     resp = client.get(f"/api/workloads/{workload}/observations", params={"limit": 5001})
     assert resp.status_code == 422
-
-
-# --- workload exists but has zero observations -------------------------------
-#
-# `store.workloads()` is `SELECT DISTINCT workload FROM observations`, and
-# every read path (`recent_observations`) filters on the same `workload`
-# column with no delete method anywhere in `Store`. So a workload can only
-# ever appear in `workloads()` once at least one observation row for it
-# exists, which means the "known workload, zero observations" 409 branches
-# in forecast/diagnosis/recommendation/recommendations are currently
-# unreachable through the real `Store` API. Not tested here per the brief:
-# forcing it would require substituting a fake store, which would prove
-# nothing about the real integration.
 
 
 # --- concurrency regression test ----------------------------------------------

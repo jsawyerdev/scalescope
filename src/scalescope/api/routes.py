@@ -19,7 +19,7 @@ from scalescope.capacity import (
     recommend_replicas,
 )
 from scalescope.config import settings
-from scalescope.diagnosis import DiagnosisResult, diagnose
+from scalescope.diagnosis import DIAGNOSIS_WINDOW_STEPS, DiagnosisResult, diagnose
 from scalescope.k8s_collector import workload_id
 from scalescope.models.base import Forecast, ForecastModel
 from scalescope.models.baselines import (
@@ -34,7 +34,8 @@ from scalescope.models.lightgbm_model import (
     validate_lightgbm_hyperparameters,
 )
 from scalescope.models.statsforecast_model import AutoEtsModel
-from scalescope.replay import replay_score
+from scalescope.replay import REPLAY_MAX_OBSERVATIONS, REPLAY_MIN_HISTORY, replay_score
+from scalescope.state import app_state
 from scalescope.storage import Store
 
 router = APIRouter(prefix="/api")
@@ -60,7 +61,7 @@ def _load_lightgbm_config(path: str | None) -> LightGbmHyperparameters:
         ) from exc
     except OSError as exc:
         raise RuntimeError(
-            "SCALESCOPE_LIGHTGBM_CONFIG_PATH could not be read: " f"{config_path}"
+            f"SCALESCOPE_LIGHTGBM_CONFIG_PATH could not be read: {config_path}: {exc}"
         ) from exc
 
     try:
@@ -86,10 +87,6 @@ _HORIZON_STEPS = settings.forecast_horizon_steps
 _HISTORY_STEPS = settings.history_window_steps
 _MAX_OBSERVATIONS_LIMIT = 5000
 _SOURCE_STALE_AFTER_SECONDS = max(30.0, settings.simulation_tick_seconds * 5)
-# The smallest per-model minimum history (baselines.py's NaiveModel); every
-# model falls back to a naive forecast below its own threshold, so this is
-# the only floor replay_score needs to produce a comparable anchor for all six.
-_REPLAY_MIN_HISTORY = 8
 _VERSION = _package_version("scalescope")
 
 # Keyed by (workload, model) -> (latest observation ts, Forecast). A fixed-size
@@ -100,10 +97,6 @@ _forecast_cache: dict[tuple[str, str], tuple[Any, Forecast]] = {}
 
 
 def get_store() -> Store:
-    # Deferred import: main.py imports this router at module load time, and
-    # app_state is only populated once the FastAPI lifespan starts.
-    from scalescope.main import app_state
-
     store: Store = app_state["store"]
     return store
 
@@ -111,8 +104,6 @@ def get_store() -> Store:
 @router.get("/source")
 def get_source() -> dict[str, Any]:
     """What ScaleScope is actually observing right now: mode and cluster identity."""
-    from scalescope.main import app_state
-
     source: dict[str, Any] = dict(app_state["source"])
     last_success = source.get("last_success_ts")
     if (
@@ -131,9 +122,13 @@ def get_source() -> dict[str, Any]:
     return source
 
 
-def _require_known_workload(store: Store, workload: str) -> None:
-    if workload not in store.workloads():
+def _recent_observations_or_404(workload: str, limit: int) -> pl.DataFrame:
+    # A workload only exists once it has an observation (the store never
+    # deletes rows), so an empty result is exactly an unknown workload.
+    df = get_store().recent_observations(workload, limit)
+    if df.is_empty():
         raise HTTPException(status_code=404, detail=f"unknown workload: {workload}")
+    return df
 
 
 def _get_forecast(workload: str, model: str, df: pl.DataFrame) -> Forecast:
@@ -152,20 +147,16 @@ def _get_forecast(workload: str, model: str, df: pl.DataFrame) -> Forecast:
 
 @router.get("/workloads")
 def list_workloads() -> list[str]:
+    """Stored workloads; in OBSERVE mode, only those currently visible, if any."""
     workloads = set(get_store().workloads())
     if settings.mode == "observe":
-        from scalescope.main import app_state
-
-        source = app_state.get("source", {})
-        target_ids: list[str] = []
-        for target in source.get("targets", []):
-            if not isinstance(target, dict):
-                continue
-            target_id = target.get("id")
-            if isinstance(target_id, str) and target_id in workloads:
-                target_ids.append(target_id)
-        if target_ids:
-            return sorted(target_ids)
+        visible = [
+            target["id"]
+            for target in app_state["source"]["targets"]
+            if target["id"] in workloads
+        ]
+        if visible:
+            return sorted(visible)
     return sorted(workloads)
 
 
@@ -173,23 +164,14 @@ def list_workloads() -> list[str]:
 def get_observations(
     workload: str, limit: int = Query(default=300, ge=1, le=_MAX_OBSERVATIONS_LIMIT)
 ) -> list[dict[str, Any]]:
-    store = get_store()
-    _require_known_workload(store, workload)
-    return store.recent_observations(workload, limit).to_dicts()
+    return _recent_observations_or_404(workload, limit).to_dicts()
 
 
 @router.get("/workloads/{workload}/forecast")
 def get_forecast(workload: str, model: str = _DEFAULT_MODEL) -> dict[str, Any]:
     if model not in _MODELS:
         raise HTTPException(status_code=400, detail=f"unknown model: {model}")
-    store = get_store()
-    _require_known_workload(store, workload)
-    df = store.recent_observations(workload, _HISTORY_STEPS)
-    if df.is_empty():
-        raise HTTPException(
-            status_code=409, detail=f"no observations yet for workload: {workload}"
-        )
-
+    df = _recent_observations_or_404(workload, _HISTORY_STEPS)
     forecast = _get_forecast(workload, model, df)
     return {
         "workload": workload,
@@ -203,14 +185,7 @@ def get_forecast(workload: str, model: str = _DEFAULT_MODEL) -> dict[str, Any]:
 
 @router.get("/workloads/{workload}/diagnosis")
 def get_diagnosis(workload: str) -> dict[str, Any]:
-    store = get_store()
-    _require_known_workload(store, workload)
-    df = store.recent_observations(workload, 30)
-    if df.is_empty():
-        raise HTTPException(
-            status_code=409, detail=f"no observations yet for workload: {workload}"
-        )
-    result = diagnose(df)
+    result = diagnose(_recent_observations_or_404(workload, DIAGNOSIS_WINDOW_STEPS))
     return {
         "workload": workload,
         "diagnosis": result.diagnosis.value,
@@ -252,30 +227,15 @@ def _compute_recommendation(
 def get_recommendation(workload: str, model: str = _DEFAULT_MODEL) -> dict[str, Any]:
     if model not in _MODELS:
         raise HTTPException(status_code=400, detail=f"unknown model: {model}")
-    store = get_store()
-    _require_known_workload(store, workload)
-    df = store.recent_observations(workload, _HISTORY_STEPS)
-    if df.is_empty():
-        raise HTTPException(
-            status_code=409, detail=f"no observations yet for workload: {workload}"
-        )
-
-    diag = diagnose(df.tail(30))
-    return _compute_recommendation(workload, model, df, diag)
+    df = _recent_observations_or_404(workload, _HISTORY_STEPS)
+    return _compute_recommendation(workload, model, df, diagnose(df))
 
 
 @router.get("/workloads/{workload}/recommendations")
 def get_all_recommendations(workload: str) -> dict[str, Any]:
     """Recommendation from every registered model, for side-by-side comparison."""
-    store = get_store()
-    _require_known_workload(store, workload)
-    df = store.recent_observations(workload, _HISTORY_STEPS)
-    if df.is_empty():
-        raise HTTPException(
-            status_code=409, detail=f"no observations yet for workload: {workload}"
-        )
-
-    diag = diagnose(df.tail(30))
+    df = _recent_observations_or_404(workload, _HISTORY_STEPS)
+    diag = diagnose(df)
     return {
         "workload": workload,
         "diagnosis": diag.diagnosis.value,
@@ -297,17 +257,10 @@ def get_replay(workload: str) -> dict[str, Any]:
     backtest point, the same discipline the diagnosis engine applies to
     scaling decisions.
     """
-    store = get_store()
-    _require_known_workload(store, workload)
-    df = store.recent_observations(workload, _MAX_OBSERVATIONS_LIMIT)
-    if df.is_empty():
-        raise HTTPException(
-            status_code=409, detail=f"no observations yet for workload: {workload}"
-        )
-
+    df = _recent_observations_or_404(workload, REPLAY_MAX_OBSERVATIONS)
     history = df["request_rate"].to_numpy()
     scores = replay_score(
-        history, _MODELS, min_history=_REPLAY_MIN_HISTORY, horizon=_HORIZON_STEPS
+        history, _MODELS, min_history=REPLAY_MIN_HISTORY, horizon=_HORIZON_STEPS
     )
     return {
         "workload": workload,
@@ -360,11 +313,17 @@ def trigger_fault(
                 detail="stress trigger is only supported in OBSERVE mode",
             )
 
-        from scalescope.main import app_state
-
         simulator = app_state.get("simulator")
         if simulator is None:
             raise HTTPException(status_code=503, detail="simulator not running yet")
+        if workload != simulator.state.name:
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "no trigger route is configured for this workload; "
+                    f"the demo simulator drives {simulator.state.name}"
+                ),
+            )
         duration_ticks = max(
             1, round(duration_seconds / settings.simulation_tick_seconds)
         )
@@ -376,55 +335,52 @@ def trigger_fault(
             "target": "demo simulator",
         }
 
-    if settings.mode == "observe":
-        if not settings.k8s_metrics_url:
-            raise HTTPException(
-                status_code=501,
-                detail=(
-                    "SCALESCOPE_K8S_METRICS_URL is not configured; ScaleScope has no "
-                    "route to the workload to trigger a fault"
-                ),
-            )
-        trigger_workload = workload_id(settings.k8s_namespace, settings.k8s_deployment)
-        if workload != trigger_workload:
-            raise HTTPException(
-                status_code=501,
-                detail=(
-                    "no trigger route is configured for this workload; "
-                    f"SCALESCOPE_K8S_METRICS_URL is attached to {trigger_workload}"
-                ),
-            )
-        base_url = settings.k8s_metrics_url.removesuffix("/metrics")
-        try:
-            response = httpx.post(
-                f"{base_url}/trigger",
-                params={"kind": kind, "duration_seconds": duration_seconds},
-                timeout=5.0,
-            )
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise HTTPException(
-                status_code=502, detail=f"could not reach workload: {exc}"
-            ) from exc
-        try:
-            response_body = response.json()
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=502, detail=f"workload returned invalid JSON: {exc}"
-            ) from exc
-        if not isinstance(response_body, dict):
-            raise HTTPException(
-                status_code=502,
-                detail="workload trigger response must be a JSON object",
-            )
-        return {
-            "workload": workload,
-            "kind": kind,
-            "duration_seconds": duration_seconds,
-            "target": base_url,
-            **response_body,
-        }
-
-    raise HTTPException(
-        status_code=400, detail=f"trigger not supported in mode={settings.mode}"
-    )
+    if not settings.k8s_metrics_url:
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "SCALESCOPE_K8S_METRICS_URL is not configured; ScaleScope has no "
+                "route to the workload to trigger a fault"
+            ),
+        )
+    trigger_workload = workload_id(settings.k8s_namespace, settings.k8s_deployment)
+    if workload != trigger_workload:
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "no trigger route is configured for this workload; "
+                f"SCALESCOPE_K8S_METRICS_URL is attached to {trigger_workload}"
+            ),
+        )
+    base_url = settings.k8s_metrics_url.removesuffix("/metrics")
+    try:
+        response = httpx.post(
+            f"{base_url}/trigger",
+            params={"kind": kind, "duration_seconds": duration_seconds},
+            timeout=5.0,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"could not reach workload: {exc}"
+        ) from exc
+    try:
+        response_body = response.json()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"workload returned invalid JSON: {exc}"
+        ) from exc
+    if not isinstance(response_body, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="workload trigger response must be a JSON object",
+        )
+    # The workload's reply is untrusted: it may add detail but must not
+    # overwrite what ScaleScope itself requested and where it sent it.
+    return {
+        **response_body,
+        "workload": workload,
+        "kind": kind,
+        "duration_seconds": duration_seconds,
+        "target": base_url,
+    }

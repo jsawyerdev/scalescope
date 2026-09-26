@@ -22,11 +22,9 @@ from scalescope.models.lightgbm_model import (
     LightGbmQuantileModel,
     validate_lightgbm_hyperparameters,
 )
-from scalescope.replay import replay_score
+from scalescope.replay import REPLAY_MAX_OBSERVATIONS, REPLAY_MIN_HISTORY, replay_score
 from scalescope.storage import Store
 
-_MAX_REPLAY_OBSERVATIONS = 5000
-_REPLAY_MIN_HISTORY = 8
 _DEFAULT_WORKLOAD = "sample-app"
 _ConfigValue = int | float | str
 
@@ -98,7 +96,7 @@ def _load_hyperparameter_config(path: Path) -> LightGbmHyperparameters:
 def _load_history(db_path: Path, workload: str) -> np.ndarray:
     store = Store(str(db_path))
     try:
-        df = store.recent_observations(workload, _MAX_REPLAY_OBSERVATIONS)
+        df = store.recent_observations(workload, REPLAY_MAX_OBSERVATIONS)
         if df.is_empty():
             known = ", ".join(store.workloads()) or "<none>"
             raise ValueError(
@@ -123,11 +121,11 @@ def _mae(
     scores = replay_score(
         history,
         {LightGbmQuantileModel.name: model},
-        min_history=_REPLAY_MIN_HISTORY,
+        min_history=REPLAY_MIN_HISTORY,
         horizon=horizon,
     )
     if not scores:
-        minimum = _REPLAY_MIN_HISTORY + horizon
+        minimum = REPLAY_MIN_HISTORY + horizon
         raise ValueError(
             "not enough history for replay scoring: "
             f"need at least {minimum} observations, got {len(history)}"

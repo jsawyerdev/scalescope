@@ -16,7 +16,13 @@ from scalescope.k8s_collector import (
     KubernetesUnavailableError,
     KubernetesWorkloadTarget,
     _label_selector,
+    _parse_prometheus_gauges,
+    _parse_quantity,
     _service_account_subject,
+)
+
+_TARGET = KubernetesWorkloadTarget(
+    namespace="scalescope-demo", deployment="sample-workload"
 )
 
 
@@ -100,12 +106,7 @@ def test_collect_wraps_deployment_transport_errors() -> None:
     )
 
     with pytest.raises(KubernetesUnavailableError, match="sample-workload"):
-        collector.collect(
-            KubernetesWorkloadTarget(
-                namespace="scalescope-demo",
-                deployment="sample-workload",
-            )
-        )
+        collector.collect(_TARGET)
 
 
 def test_label_selector_supports_match_labels_and_expressions() -> None:
@@ -130,3 +131,98 @@ def test_label_selector_rejects_empty_selector() -> None:
 
     with pytest.raises(KubernetesUnavailableError, match="no pod selector"):
         _label_selector(selector)
+
+
+@pytest.mark.parametrize(
+    ("quantity", "expected"),
+    [
+        ("250m", 0.25),
+        ("100n", 1e-7),
+        ("5u", 5e-6),
+        ("2", 2.0),
+        ("1.5", 1.5),
+        ("2k", 2000.0),
+        ("3M", 3e6),
+        ("64Mi", 64 * 1024**2),
+        ("1Gi", 1024**3),
+        ("1Ei", 1024**6),
+    ],
+)
+def test_parse_quantity_handles_kubernetes_suffixes(
+    quantity: str, expected: float
+) -> None:
+    assert _parse_quantity(quantity) == pytest.approx(expected)
+
+
+def test_prometheus_gauges_drop_non_finite_values() -> None:
+    names = {"a", "b", "c", "d"}
+    text = "a 1.5\nb NaN\nc +Inf\nd -Inf\n"
+
+    assert _parse_prometheus_gauges(text, names) == {"a": 1.5}
+
+
+def _pod(name: str, cpu_request: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        metadata=SimpleNamespace(name=name),
+        status=SimpleNamespace(phase="Running", container_statuses=[]),
+        spec=SimpleNamespace(
+            containers=[
+                SimpleNamespace(
+                    resources=SimpleNamespace(requests={"cpu": cpu_request})
+                )
+            ]
+        ),
+    )
+
+
+def _collector_with_pod_metrics(
+    pod_metrics: dict[str, object],
+) -> KubernetesObservationCollector:
+    collector, mock_apps, mock_core = _collector()
+    mock_apps.read_namespaced_deployment.return_value = SimpleNamespace(
+        spec=SimpleNamespace(
+            selector=SimpleNamespace(
+                match_labels={"app": "sample-workload"}, match_expressions=None
+            )
+        ),
+        status=SimpleNamespace(replicas=1),
+    )
+    mock_core.list_namespaced_pod.return_value = SimpleNamespace(
+        items=[_pod("pod-a", "100m")]
+    )
+    collector._custom.list_namespaced_custom_object.return_value = pod_metrics
+    return collector
+
+
+def test_collect_reports_usage_relative_to_cpu_request() -> None:
+    collector = _collector_with_pod_metrics(
+        {
+            "items": [
+                {
+                    "metadata": {"name": "pod-a"},
+                    "containers": [{"usage": {"cpu": "50m", "memory": "64Mi"}}],
+                }
+            ]
+        }
+    )
+
+    row = collector.collect(_TARGET)
+
+    assert row["cpu_usage_pct"] == 50.0
+    assert row["memory_usage_mb"] == 64.0
+
+
+def test_collect_wraps_malformed_pod_metrics() -> None:
+    collector = _collector_with_pod_metrics(
+        {
+            "items": [
+                {
+                    "metadata": {"name": "pod-a"},
+                    "containers": [{"usage": {"cpu": "fast", "memory": "64Mi"}}],
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(KubernetesUnavailableError, match="malformed pod metrics"):
+        collector.collect(_TARGET)

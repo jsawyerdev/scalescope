@@ -77,7 +77,7 @@ def test_lightgbm_keeps_base_lags_without_detected_period(
     assert captured_lags == [[1, 2, 3, 5, 10]] * 3
 
 
-def test_lightgbm_default_regressor_kwargs_match_previous_hardcoded_values(
+def test_lightgbm_default_regressor_kwargs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, captured_kwargs = _install_lightgbm_fakes(monkeypatch)
@@ -113,6 +113,24 @@ def test_lightgbm_default_regressor_kwargs_match_previous_hardcoded_values(
             "verbosity": -1,
         },
     ]
+
+
+def test_lightgbm_forwards_tuned_hyperparameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, captured_kwargs = _install_lightgbm_fakes(monkeypatch)
+    monkeypatch.setattr(lightgbm_model, "detect_period", lambda history: 1)
+
+    lightgbm_model.LightGbmQuantileModel(
+        n_estimators=180, num_leaves=31, min_child_samples=8, learning_rate=0.08
+    ).predict(np.arange(120, dtype=float), horizon=3)
+
+    assert [kwargs["alpha"] for kwargs in captured_kwargs] == [0.10, 0.50, 0.90]
+    for kwargs in captured_kwargs:
+        assert kwargs["n_estimators"] == 180
+        assert kwargs["num_leaves"] == 31
+        assert kwargs["min_child_samples"] == 8
+        assert kwargs["learning_rate"] == 0.08
 
 
 def _install_auto_ets_fakes(monkeypatch: pytest.MonkeyPatch) -> list[int]:

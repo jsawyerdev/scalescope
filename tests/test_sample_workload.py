@@ -1,18 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
-from dataclasses import replace
+import time
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
-
-from scalescope.api import routes
 
 
 @pytest.fixture(scope="session")
@@ -156,113 +152,19 @@ def test_timeline_endpoints_report_pause_and_resume(
     assert resume_response.json()["paused"] is False
 
 
-def test_scalescope_demo_rejects_observe_only_stress(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(routes, "settings", replace(routes.settings, mode="demo"))
+def test_trigger_endpoint_installs_manual_override(sample_workload: Any) -> None:
+    client = TestClient(sample_workload.app)
 
-    with pytest.raises(HTTPException) as exc_info:
-        routes.trigger_fault("sample-app", kind="stress", duration_seconds=5)
+    response = client.post("/trigger", params={"kind": "cpu", "duration_seconds": 30})
 
-    assert exc_info.value.status_code == 501
-    assert exc_info.value.detail == "stress trigger is only supported in OBSERVE mode"
+    assert response.status_code == 200
+    assert response.json()["phase"] == "manual_cpu_spike"
+    assert sample_workload._current_phase(time.time()).name == "manual_cpu_spike"
 
 
-def test_scalescope_observe_proxies_stress_trigger(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[str, dict[str, object], float]] = []
+def test_trigger_endpoint_rejects_unknown_kind(sample_workload: Any) -> None:
+    client = TestClient(sample_workload.app)
 
-    class FakeResponse:
-        def raise_for_status(self) -> None:
-            pass
+    response = client.post("/trigger", params={"kind": "disk"})
 
-        def json(self) -> dict[str, object]:
-            return {"phase": "manual_cpu_stress", "duration_seconds": 5}
-
-    def fake_post(url: str, params: dict[str, object], timeout: float) -> FakeResponse:
-        calls.append((url, params, timeout))
-        return FakeResponse()
-
-    monkeypatch.setattr(
-        routes,
-        "settings",
-        replace(
-            routes.settings,
-            mode="observe",
-            k8s_metrics_url="http://sample-workload/metrics",
-        ),
-    )
-    monkeypatch.setattr(routes.httpx, "post", fake_post)
-
-    result = routes.trigger_fault(
-        "scalescope-demo:sample-workload", kind="stress", duration_seconds=5
-    )
-
-    assert calls == [
-        (
-            "http://sample-workload/trigger",
-            {"kind": "stress", "duration_seconds": 5},
-            5.0,
-        )
-    ]
-    assert result == {
-        "workload": "scalescope-demo:sample-workload",
-        "kind": "stress",
-        "duration_seconds": 5,
-        "target": "http://sample-workload",
-        "phase": "manual_cpu_stress",
-    }
-
-
-def test_scalescope_observe_rejects_trigger_for_unconfigured_target(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        routes,
-        "settings",
-        replace(
-            routes.settings,
-            mode="observe",
-            k8s_metrics_url="http://sample-workload/metrics",
-        ),
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        routes.trigger_fault("other-ns:other-api", kind="stress", duration_seconds=5)
-
-    assert exc_info.value.status_code == 501
-    assert "no trigger route is configured" in exc_info.value.detail
-
-
-def test_scalescope_observe_rejects_invalid_trigger_json(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeResponse:
-        def raise_for_status(self) -> None:
-            pass
-
-        def json(self) -> dict[str, object]:
-            raise json.JSONDecodeError("bad json", "", 0)
-
-    def fake_post(url: str, params: dict[str, object], timeout: float) -> FakeResponse:
-        return FakeResponse()
-
-    monkeypatch.setattr(
-        routes,
-        "settings",
-        replace(
-            routes.settings,
-            mode="observe",
-            k8s_metrics_url="http://sample-workload/metrics",
-        ),
-    )
-    monkeypatch.setattr(routes.httpx, "post", fake_post)
-
-    with pytest.raises(HTTPException) as exc_info:
-        routes.trigger_fault(
-            "scalescope-demo:sample-workload", kind="stress", duration_seconds=5
-        )
-
-    assert exc_info.value.status_code == 502
-    assert "invalid JSON" in exc_info.value.detail
+    assert response.status_code == 400

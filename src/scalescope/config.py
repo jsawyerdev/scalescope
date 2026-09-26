@@ -1,7 +1,8 @@
-"""Static configuration for ScaleScope."""
+"""Runtime configuration, read from `SCALESCOPE_*` environment variables."""
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Literal, cast
@@ -19,6 +20,13 @@ def _env(name: str, default: str) -> str:
 
 def _optional_env(name: str) -> str | None:
     return os.environ.get(name) or None
+
+
+def _mode_env(name: str, default: Mode) -> Mode:
+    value = os.environ.get(name, default)
+    if value not in _VALID_MODES:
+        raise ValueError(f"{name} must be one of {sorted(_VALID_MODES)}, got {value!r}")
+    return cast(Mode, value)
 
 
 def _float_env(name: str, default: float) -> float:
@@ -108,8 +116,13 @@ class Settings:
     )
 
     def __post_init__(self) -> None:
-        if self.simulation_tick_seconds <= 0:
-            raise ValueError("SCALESCOPE_TICK_SECONDS must be greater than 0")
+        if not (
+            math.isfinite(self.simulation_tick_seconds)
+            and self.simulation_tick_seconds > 0
+        ):
+            raise ValueError(
+                "SCALESCOPE_TICK_SECONDS must be a finite number greater than 0"
+            )
         if self.forecast_horizon_steps <= 0:
             raise ValueError("SCALESCOPE_HORIZON_STEPS must be greater than 0")
         if self.history_window_steps <= 0:
@@ -122,13 +135,6 @@ class Settings:
             raise ValueError(
                 "SCALESCOPE_AUTH_USERNAME and SCALESCOPE_AUTH_PASSWORD must be set together"
             )
-
-
-def _mode_env(name: str, default: Mode) -> Mode:
-    value = os.environ.get(name, default)
-    if value not in _VALID_MODES:
-        raise ValueError(f"{name} must be one of {sorted(_VALID_MODES)}, got {value!r}")
-    return cast(Mode, value)
 
 
 settings = Settings()

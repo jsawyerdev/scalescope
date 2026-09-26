@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Mapping
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import lightgbm as lgb
 import numpy as np
@@ -122,27 +122,20 @@ class LightGbmQuantileModel:
             ):
                 lags.append(season_length)
 
+            regressor_params: dict[str, Any] = {
+                "objective": "quantile",
+                "n_estimators": self.n_estimators,
+                "num_leaves": self.num_leaves,
+                "min_child_samples": self.min_child_samples,
+                "verbosity": -1,
+            }
+            # Only passed when tuned, so the default tracks LightGBM's own.
+            if self.learning_rate is not None:
+                regressor_params["learning_rate"] = self.learning_rate
+
             quantile_forecasts: dict[str, np.ndarray] = {}
             for label, alpha in _QUANTILES.items():
-                if self.learning_rate is not None:
-                    model = lgb.LGBMRegressor(
-                        objective="quantile",
-                        alpha=alpha,
-                        n_estimators=self.n_estimators,
-                        num_leaves=self.num_leaves,
-                        min_child_samples=self.min_child_samples,
-                        verbosity=-1,
-                        learning_rate=self.learning_rate,
-                    )
-                else:
-                    model = lgb.LGBMRegressor(
-                        objective="quantile",
-                        alpha=alpha,
-                        n_estimators=self.n_estimators,
-                        num_leaves=self.num_leaves,
-                        min_child_samples=self.min_child_samples,
-                        verbosity=-1,
-                    )
+                model = lgb.LGBMRegressor(alpha=alpha, **regressor_params)
                 mlf = MLForecast(
                     models={label: model},
                     freq=1,

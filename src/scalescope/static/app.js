@@ -25,10 +25,10 @@ const MODEL_COLOR_VARS = {
 const FALLBACK_MODEL_COLOR_VAR = "--chart-muted";
 
 // Short fit description per model, shown as a hover tooltip on its name.
-// mirrors README.md's "Forecast models" table.
+// Mirrors README.md's "Forecast models" table.
 const MODEL_DESCRIPTIONS = {
   naive: "Repeats the last observed value flat. No minimum history. Good on flat stretches, poor on trends or seasonality.",
-  seasonal_naive: "Repeats the value from 150 ticks ago (half the daily cycle). Needs 158+ ticks of history; falls back to naive below that.",
+  seasonal_naive: "Repeats the last cycle of the seasonal period detected in the history. Falls back to naive until a period is confidently detected (at least two full cycles).",
   ewma: "Exponentially weighted average of the whole history, extrapolated flat. Smooths noise; always flattens, so it misses trend and seasonality.",
   linear_trend: "Least-squares line over the last 60 points. Captures short local trends; can't turn over for a full cycle.",
   auto_ets: "Nixtla StatsForecast AutoETS, general-purpose statistical fit with an 80% interval. Needs 30+ ticks; falls back to naive below that or if the fit fails.",
@@ -468,7 +468,7 @@ function updateChart(observations, forecast, allForecasts, modelNames, confidenc
   const tickSeconds = sourceTickSeconds(source);
   document.getElementById("chart-model-name").textContent = selectedLabel;
 
-  const historyLabels = observations.map((o) => new Date(o.ts.endsWith("Z") ? o.ts : `${o.ts}Z`).toLocaleTimeString());
+  const historyLabels = observations.map((o) => parseTs(o.ts).toLocaleTimeString());
   const historyValues = observations.map((o) => o.request_rate);
   const lastIndex = historyValues.length - 1;
   const forecastLabels = forecast.p50.map((_, i) => horizonLabel(i, tickSeconds));
@@ -694,8 +694,8 @@ function wireTriggerButtons() {
   });
 }
 
-// Replay is a full model-retrain pass over recorded history (~2s), so it
-// runs on demand rather than on the main 3s poll cycle.
+// Replay is a full model-retrain pass over recorded history (seconds, not
+// milliseconds), so it runs on demand rather than on the main 3s poll cycle.
 function renderReplay(result) {
   const body = document.getElementById("replay-table-body");
   const rows = result.scores.map((s, i) => {
@@ -732,10 +732,19 @@ function wireReplayButton() {
 }
 
 async function loadWorkloads() {
-  const [workloads, source] = await Promise.all([
-    fetchJson("/api/workloads"),
-    fetchJson("/api/source"),
-  ]);
+  let workloads;
+  let source;
+  try {
+    [workloads, source] = await Promise.all([
+      fetchJson("/api/workloads"),
+      fetchJson("/api/source"),
+    ]);
+  } catch (err) {
+    fetchError.hidden = false;
+    fetchError.textContent = `connection error: ${err.message} - retrying`;
+    setTimeout(loadWorkloads, POLL_INTERVAL_MS);
+    return;
+  }
   updateWorkloadLabels(source);
   if (workloads.length === 0) {
     fetchError.hidden = false;

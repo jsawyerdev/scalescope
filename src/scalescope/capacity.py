@@ -45,11 +45,7 @@ def recommend_replicas(
     peak_demand = float(p90_window.max()) if len(p90_window) else 0.0
 
     safe_capacity_per_pod = CAPACITY_PER_POD_RPS * TARGET_UTILIZATION
-    raw_required = (
-        math.ceil(peak_demand / safe_capacity_per_pod)
-        if safe_capacity_per_pod
-        else current_replicas
-    )
+    raw_required = math.ceil(peak_demand / safe_capacity_per_pod)
     required = max(MIN_REPLICAS, min(MAX_REPLICAS, raw_required))
 
     step = required - current_replicas
