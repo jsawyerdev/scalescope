@@ -28,6 +28,21 @@ _FALSE_VALUES = frozenset({"0", "false", "no", "off", ""})
 # One query per tick, returning requests/s per pod; ScaleScope attributes
 # pods to Deployments itself through their label selectors.
 DEFAULT_PROMETHEUS_RPS_QUERY = "sum by (namespace, pod) (rate(http_requests_total[2m]))"
+# cAdvisor metrics, which Prometheus scrapes from the kubelet in most setups.
+DEFAULT_PROMETHEUS_THROTTLING_QUERY = (
+    "sum by (namespace, pod) "
+    '(rate(container_cpu_cfs_throttled_periods_total{container!=""}[2m]))'
+    " / sum by (namespace, pod) "
+    '(rate(container_cpu_cfs_periods_total{container!=""}[2m]))'
+)
+DEFAULT_PROMETHEUS_LATENCY_QUERY = (
+    "1000 * histogram_quantile(0.95, sum by (namespace, pod, le) "
+    "(rate(http_request_duration_seconds_bucket[2m])))"
+)
+DEFAULT_PROMETHEUS_ERROR_RATE_QUERY = (
+    'sum by (namespace, pod) (rate(http_requests_total{code=~"5.."}[2m]))'
+    " / sum by (namespace, pod) (rate(http_requests_total[2m]))"
+)
 
 
 def _env(name: str, default: str) -> str:
@@ -160,6 +175,11 @@ class Settings:
             "SCALESCOPE_RETENTION_HOURS", DEFAULT_RETENTION_HOURS
         )
     )
+    # p95 latency (ms) the latency model sizes pods for. Unset -> twice each
+    # workload's own no-load latency.
+    latency_slo_ms: float | None = field(
+        default_factory=lambda: _optional_float_env("SCALESCOPE_LATENCY_SLO_MS")
+    )
     # Optional per-workload demand source for OBSERVE mode: an instant query
     # whose series carry `namespace` and `pod` labels.
     prometheus_url: str | None = field(
@@ -168,6 +188,23 @@ class Settings:
     prometheus_rps_query: str = field(
         default_factory=lambda: _env(
             "SCALESCOPE_PROMETHEUS_RPS_QUERY", DEFAULT_PROMETHEUS_RPS_QUERY
+        )
+    )
+    prometheus_throttling_query: str = field(
+        default_factory=lambda: _env(
+            "SCALESCOPE_PROMETHEUS_THROTTLING_QUERY",
+            DEFAULT_PROMETHEUS_THROTTLING_QUERY,
+        )
+    )
+    prometheus_latency_query: str = field(
+        default_factory=lambda: _env(
+            "SCALESCOPE_PROMETHEUS_LATENCY_QUERY", DEFAULT_PROMETHEUS_LATENCY_QUERY
+        )
+    )
+    prometheus_error_rate_query: str = field(
+        default_factory=lambda: _env(
+            "SCALESCOPE_PROMETHEUS_ERROR_RATE_QUERY",
+            DEFAULT_PROMETHEUS_ERROR_RATE_QUERY,
         )
     )
     # Both unset -> no auth (default, e.g. local zero-config DEMO). Both set
@@ -200,6 +237,12 @@ class Settings:
         ):
             raise ValueError(
                 "SCALESCOPE_CAPACITY_PER_POD_RPS must be a finite number greater than 0"
+            )
+        if self.latency_slo_ms is not None and not (
+            math.isfinite(self.latency_slo_ms) and self.latency_slo_ms > 0
+        ):
+            raise ValueError(
+                "SCALESCOPE_LATENCY_SLO_MS must be a finite number greater than 0"
             )
         if not 1 <= self.min_replicas <= self.max_replicas:
             raise ValueError(

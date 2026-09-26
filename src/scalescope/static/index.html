@@ -166,6 +166,23 @@
     </div>
     <span id="replay-status" class="note">-</span>
 
+    <h3>Scaling replay <button id="scaling-replay-btn" class="button">Run scaling replay</button></h3>
+    <p class="note">Replays this workload's recorded demand through ScaleScope and through a standard reactive Kubernetes HPA, with the same pod capacity and start-up delay. Neither sees the future.</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Policy</th>
+            <th class="num hint" title="Share of time demand was more than the ready pods could serve.">Time short of pods</th>
+            <th class="num">Average pods</th>
+            <th class="num hint" title="How often the pod count changed.">Scale changes</th>
+          </tr>
+        </thead>
+        <tbody id="scaling-replay-body"></tbody>
+      </table>
+    </div>
+    <span id="scaling-replay-status" class="note">-</span>
+
     <h3>Raw observations <span class="note">last 40, newest first</span></h3>
     <div class="table-wrap log-wrap">
       <table>

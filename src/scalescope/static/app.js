@@ -301,6 +301,10 @@ function renderDecision(rec, forecast, latest, source, horizonText) {
     rec.model === actuationModel
       ? `Forecast by ${rec.model}, the model the autoscaler uses.`
       : `Viewing ${rec.model}; the autoscaler uses ${actuationModel}.`;
+  const latency = rec.latency_model;
+  const capacityNote = latency
+    ? ` Pod capacity comes from this workload's latency curve: p95 stays under ${formatNumber(latency.latency_target_ms)} ms up to ${formatNumber(rec.capacity_per_pod * rec.target_utilization)} ${signal.unit} per pod.`
+    : "";
   const demandNote =
     forecast.demand_signal === "cpu_millicores"
       ? " Demand is measured as total CPU because this workload reports no request rate."
@@ -309,7 +313,7 @@ function renderDecision(rec, forecast, latest, source, horizonText) {
     source.mode === "observe" && source.actuate
       ? " Autoscaling is on: ScaleScope applies this automatically."
       : " Advisory only: nothing in the cluster is changed.";
-  setText("decision-footnote", `${modelNote}${demandNote}${autoscaling}`);
+  setText("decision-footnote", `${modelNote}${capacityNote}${demandNote}${autoscaling}`);
 }
 
 // ---------- charts ----------
@@ -702,6 +706,37 @@ function wireReplayButton() {
   });
 }
 
+function wireScalingReplayButton() {
+  const btn = document.getElementById("scaling-replay-btn");
+  const status = document.getElementById("scaling-replay-status");
+  btn.addEventListener("click", async () => {
+    if (!currentWorkload) return;
+    btn.disabled = true;
+    status.textContent = "replaying recorded demand through both policies...";
+    try {
+      const result = await fetchJson(
+        `/api/workloads/${encodeURIComponent(currentWorkload)}/scaling-replay`
+      );
+      const rows = result.outcomes.map((o) => {
+        const row = document.createElement("tr");
+        appendCell(row, o.name);
+        appendCell(row, `${o.under_provisioned_pct.toFixed(1)}%`, "num");
+        appendCell(row, o.average_pods.toFixed(1), "num");
+        appendCell(row, `${o.scale_changes}`, "num");
+        return row;
+      });
+      document.getElementById("scaling-replay-body").replaceChildren(...rows);
+      status.textContent = result.outcomes.length
+        ? `${formatDuration(result.replayed_seconds)} replayed, a decision every ${formatDuration(result.decision_every_seconds)}`
+        : `Cannot replay yet: ${result.reason}.`;
+    } catch (err) {
+      status.textContent = `scaling replay failed: ${err.message}`;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
 // ---------- startup ----------
 
 async function loadWorkloads() {
@@ -746,4 +781,5 @@ async function loadWorkloads() {
 Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
 wireTriggerButtons();
 wireReplayButton();
+wireScalingReplayButton();
 loadWorkloads();

@@ -6,7 +6,7 @@ runs that alongside a deterministic diagnosis engine that flags when scaling is
 the wrong response (CPU limit throttling, memory leak, node capacity exhaustion,
 HPA ceiling, non-CPU bottleneck).
 
-## Status: v0.13.0 (deploy to any cluster with metrics-server; forecasts request rate or total CPU; a plain-language dashboard that shows exactly what the autoscaler would do)
+## Status: v0.14.0 (sizes pods from each workload's own latency curve, a queueing model fitted from its history; replays scaling decisions against a reactive HPA; throttling, latency, and errors for every workload from Prometheus)
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed at each version.
 
@@ -22,21 +22,23 @@ ScaleScope is a working lab with two supported runtime modes:
   Kubernetes API and metrics-server, and shows them as selectable
   `namespace/deployment` targets. Every workload gets a forecast and a
   replica recommendation from **metrics-server alone** (see "What the
-  forecast uses"); request rates from Prometheus make it sharper but are
-  optional. `latency_p95_ms` and `error_rate` need the workload's own
-  metrics endpoint and report `0.0` rather than a fabricated value without it.
+  forecast uses"); Prometheus adds per-pod request rate, CPU throttling,
+  p95 latency, and error rate for every workload, but is optional. A signal
+  nothing supplies reads `0.0` rather than a fabricated value.
 
 ## What the forecast uses
 
 | Signal | Source | Used for |
 |---|---|---|
-| Request rate | the workload's own `/metrics` (`SCALESCOPE_K8S_METRICS_URL`), or one per-pod Prometheus query (`SCALESCOPE_PROMETHEUS_URL`) | **forecast input** when present |
+| Request rate | the workload's own `/metrics` (`SCALESCOPE_K8S_METRICS_URL`), or a per-pod Prometheus query (`SCALESCOPE_PROMETHEUS_URL`) | **forecast input** when present |
 | Total CPU used by all the workload's pods (millicores) | metrics-server | **forecast input** otherwise; per-pod capacity estimate |
+| p95 latency per pod | the workload's own `/metrics`, or a per-pod Prometheus histogram query | **pod capacity** (the latency curve, see "Performance model"); diagnosis |
 | CPU request per pod | the Deployment's pod template | capacity when forecasting CPU |
-| Per-pod CPU % of request | metrics-server + pod specs | capacity estimate, diagnosis |
-| Replicas: `spec` (desired) and `status` | Kubernetes API | planning from `spec`; capacity estimate from `status` |
+| Per-pod CPU % of request | metrics-server + pod specs | capacity fallback, diagnosis |
+| Replicas: `spec` (desired) and `status` | Kubernetes API | planning from `spec`; capacity from `status` |
+| CPU throttling | Prometheus (cAdvisor's CFS counters) | diagnosis |
+| Error rate | the workload's own `/metrics`, or Prometheus | diagnosis |
 | Memory, restarts, pending pods | metrics-server, Kubernetes API | diagnosis only |
-| p95 latency, error rate | the workload's own `/metrics` | diagnosis only |
 | Disk I/O, network I/O, node pressure | **not collected** | — |
 
 The forecast takes exactly one series per workload, and it must be *demand*:
@@ -55,7 +57,7 @@ Requirements: metrics-server (most managed clusters ship it), and CPU
 requests on the Deployments you want recommendations for.
 
 ```
-kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.13.0"
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.14.0"
 kubectl -n scalescope-system port-forward svc/scalescope 8000:80
 ```
 
@@ -66,15 +68,18 @@ ServiceAccount can read. **The step-by-step guide, including configuration,
 turning on autoscaling, exposing the dashboard, the sample workload, upgrades,
 and troubleshooting, is [examples/README.md](examples/README.md).** Optional:
 
-- `SCALESCOPE_PROMETHEUS_URL`: request rates from one instant query whose
-  series carry `namespace` and `pod` labels (default
-  `sum by (namespace, pod) (rate(http_requests_total[2m]))`). ScaleScope
+- `SCALESCOPE_PROMETHEUS_URL`: per-pod request rate, CPU throttling, p95
+  latency, and error rate, one instant query each per tick; every series must
+  carry `namespace` and `pod` labels (defaults in "Run it"). ScaleScope
   attributes pods to Deployments through their label selectors.
+- `SCALESCOPE_LATENCY_SLO_MS`: the p95 latency pods are sized to keep. Unset,
+  it is twice the workload's own no-load latency.
 - `SCALESCOPE_CAPACITY_PER_POD_RPS`: requests/s one pod serves at 100% of its
-  CPU request. Unset, it is estimated per workload as the median of
+  CPU request, from a load test. Unset, capacity comes from the latency curve
+  (see "Performance model"), or else the median of
   `(request_rate / replicas) / cpu_fraction` over samples between 5% and 95%
-  CPU; with too few samples the recommendation keeps the current replica
-  count and says the capacity is unknown, instead of guessing.
+  CPU; with neither, the recommendation keeps the current replica count and
+  says the capacity is unknown, instead of guessing.
 - Actuation: see "Actuation" below.
 
 ## Screenshots
@@ -171,7 +176,9 @@ flowchart TB
         ACTUATOR["k8s_actuator.py<br/>opt-in write, refuses if a<br/>competing HPA exists"]
         STORE[("storage.py<br/>DuckDB")]
         MODELS["models/*.py<br/>naive · seasonal_naive · ewma · linear_trend<br/>auto_ets (StatsForecast) · lightgbm_quantile"]
+        PERF["performance.py<br/>queueing latency model per pod"]
         CAPACITY["capacity.py<br/>forecast to required replicas"]
+        REPLAY["scaling_replay.py<br/>ScaleScope vs reactive HPA"]
         DIAGNOSIS["diagnosis.py<br/>deterministic rule engine,<br/>never calls a model"]
         API["api/routes.py<br/>FastAPI"]
         UI["static/<br/>dashboard, no build step"]
@@ -184,8 +191,12 @@ flowchart TB
     COLLECTOR -->|insert_observation| STORE
 
     STORE --> MODELS
+    STORE --> PERF
     STORE --> DIAGNOSIS
     MODELS --> CAPACITY
+    PERF --> CAPACITY
+    CAPACITY --> REPLAY
+    REPLAY --> API
     CAPACITY --> API
     DIAGNOSIS --> API
     STORE --> API
@@ -201,6 +212,60 @@ that signal (adding replicas lowers per-pod CPU, which would make the
 forecast look self-correcting). It forecasts demand, request rate or total
 CPU, which the replica count does not alter, then divides by per-pod
 capacity (see "What the forecast uses").
+
+The pipeline is four separate models, each checked against the data before
+it is trusted:
+
+1. **Demand model** (`models/`): what load arrives over the next horizon, as
+   p10/p50/p90.
+2. **Performance model** (`performance.py`): how much load one pod carries
+   before latency breaks its target.
+3. **Policy** (`capacity.py`): pods = p90 demand / safe load per pod, scaling
+   up for the peak within pod start-up time and down only when the whole
+   horizon fits, rate-limited.
+4. **Safety gate** (`diagnosis.py`): holds the pod count when more pods would
+   not fix the problem.
+
+## Performance model
+
+A pod serving requests is a queue. With load `x` requests/s per pod and
+saturation throughput `μ`, the M/M/1 response time grows as `1 / (μ − x)`,
+and every percentile of it, p95 included, scales the same way. Adding the
+load-independent part (network, fixed work) gives:
+
+```
+p95(x) = B + c / (μ − x)
+```
+
+ScaleScope fits `B`, `c`, and `μ` per workload from its own history of
+(request rate / ready pods, p95 latency), then sizes pods so the planned load
+per pod keeps p95 at the target: `x* = μ − c / (target − B)`. The target is
+`SCALESCOPE_LATENCY_SLO_MS`, or twice the no-load latency `p95(0)`. This
+replaces "CPU scales linearly with work" with the constraint that actually
+limits the service, whatever it is (CPU, a lock, a connection pool, a
+downstream call), because it is read from latency.
+
+How it is fitted (`fit_latency_model`), all deterministic:
+
+- For each `μ` on a 400-point geometric grid above the highest observed load,
+  the model is linear in (`B`, `c`) and solved exactly by least squares on
+  relative error, since latency noise scales with latency.
+- Incidents (a throttled pod, a slow dependency) put points far off the
+  healthy curve, so the fit is refined by least trimmed squares: two refits,
+  each without the 15% of samples the previous fit explains worst.
+- It is used only if the data identify it: at least 30 samples, a load range
+  of at least 1.5×, R² ≥ 0.6, a best `μ` inside the grid (a fit at the top
+  edge means saturation was never approached), `B ≥ 0` and `c > 0`.
+- The planned load per pod never exceeds the highest load per pod actually
+  seen meeting the target: past the data the curve is an extrapolation.
+
+When any check fails, capacity falls back to the CPU estimate, and the
+dashboard says which one it used. Measured on the simulator (true curve
+`μ` = 220, `B` = 20, `c` ≈ 3000, so the default target is reached at 156.5
+requests/s per pod), across 6 seeds and 500- and 1500-tick histories that
+include fault episodes: 8 of 12 fits were accepted and planned 134–165
+requests/s per pod; the other 4 declined and used the CPU estimate. The fit
+takes 0.1-0.15 s for 1500 samples.
 
 ## Forecast models
 
@@ -274,6 +339,36 @@ The same directory also includes a cron-safe periodic re-tuning driver that
 copies current DuckDB data from a running compose service, compares the deployed
 config against the new candidate on that data, and only restarts services after
 a real promotion.
+
+### Scaling replay
+
+`GET /api/workloads/{name}/scaling-replay` (the dashboard's "Scaling replay"
+panel) answers "would ScaleScope have scaled this workload better than a
+standard HPA?" from the workload's own history. Capacity is resolved from the
+first third of the history only; the last two thirds are replayed through
+both policies with the same capacity, replica bounds, and 15-tick pod
+start-up delay, and neither sees the future. ScaleScope runs the same
+forecast, diagnosis, and recommendation code it actuates with; the reactive
+HPA sizes for the demand it has just seen and holds scale-downs for 300s. A
+tick is short of capacity when demand exceeds what the ready pods serve at
+saturation.
+
+On the simulator (1500 ticks, 5 seeds, latency-model capacity where it was
+identified), by ScaleScope's scale-down stabilization:
+
+| `SCALESCOPE_SCALE_DOWN_STABILIZATION_SECONDS` | Pods vs reactive HPA | Seeds with ticks short of capacity |
+|---|---|---|
+| 0 (default) | 9-17% fewer | 3 of 5 (1.7-2.0% of ticks) |
+| 60 | 1-9% fewer | 1 of 5 (1.9%) |
+| 120 | 0-10% more | 0 of 5 |
+| 300 | 12-22% more | 0 of 5 |
+
+The shortfalls are the simulator's sudden `traffic_spike` steps (+600
+requests/s in one tick), which no forecast anticipates; the reactive HPA
+absorbs them only with pods its stabilization window kept from an earlier
+peak. Held capacity is the only defence against unannounced steps, so this
+is a cost/risk choice, not a defect either policy can remove. The default
+stays at 0; run the replay on your own workload before choosing.
 
 ## Diagnosis logic
 
@@ -397,9 +492,13 @@ Environment variables (see `src/scalescope/config.py`):
 | `SCALESCOPE_K8S_NAMESPACES` | `SCALESCOPE_K8S_NAMESPACE` | Comma-separated namespaces to discover in OBSERVE mode; `*` lists all namespaces visible to the ServiceAccount |
 | `SCALESCOPE_K8S_KUBECONFIG` | unset | Kubeconfig path; unset tries in-cluster config, then default kubeconfig discovery |
 | `SCALESCOPE_K8S_METRICS_URL` | unset | Primary workload's own `/metrics` URL, for real `request_rate`/`latency_p95_ms`/`error_rate` and `/trigger` proxying |
-| `SCALESCOPE_PROMETHEUS_URL` | unset | Optional Prometheus base URL for per-pod request rates (see "Deploy to any cluster") |
-| `SCALESCOPE_PROMETHEUS_RPS_QUERY` | `sum by (namespace, pod) (rate(http_requests_total[2m]))` | Instant query; series must carry `namespace` and `pod` labels |
-| `SCALESCOPE_CAPACITY_PER_POD_RPS` | unset | Requests/s one pod serves at 100% of its CPU request; unset estimates it per workload |
+| `SCALESCOPE_PROMETHEUS_URL` | unset | Optional Prometheus base URL for per-pod signals (see "Deploy to any cluster") |
+| `SCALESCOPE_PROMETHEUS_RPS_QUERY` | `sum by (namespace, pod) (rate(http_requests_total[2m]))` | Request rate. Every query is an instant query whose series carry `namespace` and `pod` labels; an empty value skips that signal |
+| `SCALESCOPE_PROMETHEUS_THROTTLING_QUERY` | cAdvisor `container_cpu_cfs_throttled_periods_total` / `container_cpu_cfs_periods_total` rate ratio | Fraction of CPU periods throttled (0-1) |
+| `SCALESCOPE_PROMETHEUS_LATENCY_QUERY` | `1000 * histogram_quantile(0.95, sum by (namespace, pod, le) (rate(http_request_duration_seconds_bucket[2m])))` | p95 latency in ms |
+| `SCALESCOPE_PROMETHEUS_ERROR_RATE_QUERY` | `http_requests_total{code=~"5.."}` rate / `http_requests_total` rate | Fraction of requests failing (0-1) |
+| `SCALESCOPE_LATENCY_SLO_MS` | unset | p95 latency target for latency-model sizing; unset is twice the workload's no-load latency |
+| `SCALESCOPE_CAPACITY_PER_POD_RPS` | unset | Requests/s one pod serves at 100% of its CPU request; overrides the latency model and CPU estimate |
 | `SCALESCOPE_TARGET_UTILIZATION` | `0.70` | Fraction of per-pod capacity to size for, in (0, 1] |
 | `SCALESCOPE_MIN_REPLICAS` / `SCALESCOPE_MAX_REPLICAS` | `1` / `30` | Bounds on every recommendation; the max is also the diagnosis engine's HPA ceiling |
 | `SCALESCOPE_SCALE_DOWN_STABILIZATION_SECONDS` | `0` | Actuation only: hold scale-downs at the highest recommendation of this window (HPA default is 300) |
@@ -734,6 +833,8 @@ triggers require that variable to be set.
 - `GET /api/workloads/{name}/replay` — backtests every model against this
   workload's recorded history (MAE/MAPE, sorted best first) — what the
   dashboard's "Replay lab" panel calls on demand
+- `GET /api/workloads/{name}/scaling-replay` — ScaleScope vs a reactive HPA
+  over this workload's recorded demand (see "Scaling replay")
 - `GET /api/source` — what this instance is actually observing (mode, cluster, connection status)
 - `POST /api/workloads/{name}/trigger?kind={cpu|memory|traffic|stress}&duration_seconds=45` — force a load
   pattern now (DEMO: the local simulator; OBSERVE: proxied to the real workload's own `/trigger`,
@@ -761,41 +862,22 @@ The bundled DejaVu Sans Mono Regular font keeps its own license in
 `src/scalescope/static/fonts/DejaVu-LICENSE.txt`, and the vendored Chart.js
 4.5.1 (MIT) in `src/scalescope/static/vendor/Chart.js-LICENSE.md`.
 
-## Concurrency and consistency
-
-- **Deadlocks**: every lock is a plain `threading.Lock`, and none is ever
-  acquired while another is held (the DuckDB store lock, the forecast cache
-  lock, and the sample workload's override/timeline/stress locks). Store
-  calls from the collection loops run off the event loop, so a long API
-  query can delay a write but never stall health checks.
-- **Memory**: observations are pruned after `SCALESCOPE_RETENTION_HOURS`;
-  the forecast cache is an LRU of 2,048 entries. RSS stayed flat at ~390 MB
-  across 180 full six-model retrains in a soak test.
-- **N+1**: collection costs one Deployment list, plus one Pod list and one
-  PodMetrics list per namespace, plus at most one Prometheus query per tick,
-  regardless of how many Deployments there are. API requests read the store
-  once each.
-- **No distributed lock**: run exactly one ScaleScope replica. The manifest
-  uses `replicas: 1`, `Recreate`, and a `ReadWriteOnce` volume, and DuckDB
-  refuses a second writer on the same file, so a second actuating replica
-  fails to start rather than double-writing. There is no leader election.
-- **Eventual consistency**: planning uses `spec.replicas` (see "Actuation");
-  metrics-server usage trails reality by its scrape interval (15-60s), which
-  the median-based capacity estimate absorbs; the HPA-conflict check and the
-  scale write are not atomic, so an HPA created between them is caught on
-  the next tick.
-
 ## Known limitations
 
-- **`cpu_throttled_pct` in OBSERVE mode**: needs cAdvisor
-  `container_cpu_cfs_throttled` data, reachable only through the kubelet
-  (`nodes/proxy`); always `0.0` when observing a real cluster.
-- **Replay lab vs. real HPA behavior**: the replay lab scores forecasts, not
-  scaling decisions. The policy comparison in "Scaling policy" was run
-  offline on synthetic demand; it is not yet a product feature.
-- **Latency and error rate** come only from the primary target's
-  `SCALESCOPE_K8S_METRICS_URL`, so the non-CPU-bottleneck diagnosis only
-  applies there.
-- **Linear CPU model**: capacity from CPU assumes CPU usage scales linearly
-  with work. Workloads bound by memory, I/O, or a downstream dependency need
-  `SCALESCOPE_CAPACITY_PER_POD_RPS` set from a load test instead.
+- **The latency model needs load variety.** A workload whose per-pod load
+  has always sat in a narrow band (for example, held there by an HPA) does
+  not reveal where its latency curve bends; ScaleScope then declines the fit
+  and sizes from CPU, which assumes CPU scales linearly with work. For
+  workloads bound by memory, I/O, or a dependency that also lack latency
+  data, set `SCALESCOPE_CAPACITY_PER_POD_RPS` from a load test.
+- **Throttling, latency, and error rate for every workload need
+  Prometheus.** Without it only the primary target's
+  `SCALESCOPE_K8S_METRICS_URL` supplies latency and errors, and throttling
+  reads `0.0` (cAdvisor is otherwise reachable only through the kubelet's
+  `nodes/proxy`, which ScaleScope does not ask for).
+- **The scaling replay is a model of the cluster**, not a recording of it:
+  pods start after a fixed 15 ticks and capacity is the fitted per-pod
+  capacity. It compares policies on the same assumptions; it does not
+  predict absolute outcomes.
+- **Unannounced demand steps** are not forecastable; see "Scaling replay"
+  for the pods-versus-shortfall tradeoff and the setting that controls it.

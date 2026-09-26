@@ -12,8 +12,10 @@ import polars as pl
 from fastapi import APIRouter, HTTPException, Query
 
 from scalescope.capacity import (
+    HPA_SCALE_DOWN_STABILIZATION_SECONDS,
     STARTUP_LEAD_STEPS,
     CapacityRecommendation,
+    PodCapacity,
     recommend_replicas,
     resolve_capacity,
 )
@@ -24,6 +26,7 @@ from scalescope.k8s_collector import workload_id
 from scalescope.models.base import Forecast
 from scalescope.models.registry import ACTUATION_MODEL, MODELS
 from scalescope.replay import REPLAY_MAX_OBSERVATIONS, REPLAY_MIN_HISTORY, replay_score
+from scalescope.scaling_replay import capacity_training_rows, replay_scaling
 from scalescope.state import app_state
 from scalescope.storage import Store
 
@@ -156,15 +159,38 @@ def _diagnose(df: pl.DataFrame) -> DiagnosisResult:
     return diagnose(df, max_replicas=settings.max_replicas)
 
 
+def _capacity(df: pl.DataFrame, signal: DemandSignal) -> PodCapacity:
+    return resolve_capacity(
+        df, signal, settings.capacity_per_pod_rps, settings.latency_slo_ms
+    )
+
+
+def _capacity_summary(capacity: PodCapacity) -> dict[str, Any] | None:
+    model = capacity.latency_model
+    if model is None:
+        return None
+    return {
+        "base_ms": round(model.base_ms, 2),
+        "saturation_rps_per_pod": round(model.saturation_rps, 2),
+        "no_load_latency_ms": round(model.no_load_latency_ms, 2),
+        "latency_target_ms": capacity.latency_target_ms,
+        "r_squared": round(model.r_squared, 3),
+    }
+
+
 def _compute_recommendation(
-    workload: str, model: str, df: pl.DataFrame, diag: DiagnosisResult
+    workload: str,
+    model: str,
+    df: pl.DataFrame,
+    diag: DiagnosisResult,
+    signal: DemandSignal,
+    capacity: PodCapacity,
 ) -> dict[str, Any]:
-    signal = demand_signal(df)
     rec: CapacityRecommendation = recommend_replicas(
         # spec.replicas, not status: status lags a scale write by many seconds.
         int(df["desired_replicas"][-1]),
         _get_forecast(workload, model, df, signal),
-        resolve_capacity(df, signal, settings.capacity_per_pod_rps),
+        capacity,
         settings.scaling_policy,
         peak_step=STARTUP_LEAD_STEPS,
         scaling_will_help=diag.scaling_will_help,
@@ -178,9 +204,12 @@ def _compute_recommendation(
         "projected_utilization": rec.projected_utilization,
         "confidence": rec.confidence,
         "demand_signal": signal,
-        "capacity_per_pod": rec.capacity.per_pod,
-        "capacity_source": rec.capacity.source,
-        "target_utilization": settings.target_utilization,
+        "capacity_per_pod": capacity.per_pod,
+        "capacity_source": capacity.source,
+        "target_utilization": (
+            capacity.target_utilization or settings.target_utilization
+        ),
+        "latency_model": _capacity_summary(capacity),
         "hold_reason": rec.hold_reason,
         "pods_needed": rec.pods_needed,
         "startup_lead_steps": STARTUP_LEAD_STEPS,
@@ -195,7 +224,10 @@ def get_recommendation(workload: str, model: str = ACTUATION_MODEL) -> dict[str,
     if model not in MODELS:
         raise HTTPException(status_code=400, detail=f"unknown model: {model}")
     df = _recent_observations_or_404(workload, _HISTORY_STEPS)
-    return _compute_recommendation(workload, model, df, _diagnose(df))
+    signal = demand_signal(df)
+    return _compute_recommendation(
+        workload, model, df, _diagnose(df), signal, _capacity(df, signal)
+    )
 
 
 @router.get("/workloads/{workload}/recommendations")
@@ -203,14 +235,16 @@ def get_all_recommendations(workload: str) -> dict[str, Any]:
     """Recommendation from every registered model, for side-by-side comparison."""
     df = _recent_observations_or_404(workload, _HISTORY_STEPS)
     diag = _diagnose(df)
+    signal = demand_signal(df)
+    capacity = _capacity(df, signal)
     return {
         "workload": workload,
         "diagnosis": diag.diagnosis.value,
         "scaling_will_help": diag.scaling_will_help,
         "explanation": diag.explanation,
         "models": [
-            _compute_recommendation(workload, model_name, df, diag)
-            for model_name in MODELS
+            _compute_recommendation(workload, name, df, diag, signal, capacity)
+            for name in MODELS
         ],
     }
 
@@ -250,6 +284,46 @@ def get_replay(workload: str) -> dict[str, Any]:
             # p90 drives replica sizing, so rank on how well it is forecast.
             key=lambda s: s["p90_pinball_loss"],
         ),
+    }
+
+
+@router.get("/workloads/{workload}/scaling-replay")
+def get_scaling_replay(workload: str) -> dict[str, Any]:
+    """Replay this workload's recorded demand through ScaleScope and a reactive HPA.
+
+    See `scalescope.scaling_replay` for the method. Returns `outcomes: []`
+    with a `reason` when there is too little history or no pod capacity.
+    """
+    df = _recent_observations_or_404(workload, REPLAY_MAX_OBSERVATIONS)
+    signal = demand_signal(df)
+    capacity = _capacity(capacity_training_rows(df), signal)
+    tick = settings.simulation_tick_seconds
+    result = replay_scaling(
+        df,
+        signal,
+        capacity,
+        settings.scaling_policy,
+        MODELS[ACTUATION_MODEL],
+        _HORIZON_STEPS,
+        _HISTORY_STEPS,
+        hpa_stabilization_ticks=round(HPA_SCALE_DOWN_STABILIZATION_SECONDS / tick),
+        scale_down_stabilization_ticks=round(
+            settings.scale_down_stabilization_seconds / tick
+        ),
+    )
+    if result is None:
+        reason = (
+            "pod capacity is not known yet"
+            if capacity.per_pod is None
+            else "not enough history yet"
+        )
+        return {"workload": workload, "outcomes": [], "reason": reason}
+    return {
+        "workload": workload,
+        "replayed_seconds": round(result.ticks * tick),
+        "decision_every_seconds": round(result.decision_every * tick, 1),
+        "capacity_source": capacity.source,
+        "outcomes": [vars(outcome) for outcome in result.outcomes],
     }
 
 

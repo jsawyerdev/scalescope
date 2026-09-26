@@ -23,7 +23,11 @@ CPU_REQUEST_MILLICORES = 1000.0
 TARGET_CPU_UTILIZATION = 0.60
 MIN_REPLICAS = 3
 MAX_REPLICAS = 30
-BASE_LATENCY_MS = 25.0
+BASE_LATENCY_MS = 20.0
+# p95 of an M/M/1 response time is ln(20) / (mu - x) seconds; in ms * req/s.
+QUEUEING_P95_COEFFICIENT = math.log(20) * 1000
+# An overloaded pod's queue grows without bound; report a capped latency.
+OVERLOAD_LATENCY_MS = 2000.0
 BASE_MEMORY_MB = 180.0
 FAULTS = ("traffic_spike", "memory_leak", "cpu_limit", "node_capacity")
 
@@ -143,10 +147,15 @@ class WorkloadSimulator:
         self.state.memory_baseline_mb += self.state.memory_leak_mb_per_tick
         memory_usage_mb = self.state.memory_baseline_mb + self.state.rng.gauss(0, 5)
 
-        saturation = max(0.0, utilization_per_pod - TARGET_CPU_UTILIZATION)
-        latency_p95_ms = BASE_LATENCY_MS * (1 + saturation * 6) + self.state.rng.gauss(
-            0, 3
+        # Each pod is a queue: latency climbs as its load nears capacity.
+        load_per_pod = demand / self.state.replicas
+        headroom = effective_capacity_per_pod - load_per_pod
+        queueing_ms = (
+            QUEUEING_P95_COEFFICIENT / headroom if headroom > 0 else OVERLOAD_LATENCY_MS
         )
+        latency_p95_ms = min(
+            OVERLOAD_LATENCY_MS, BASE_LATENCY_MS + queueing_ms
+        ) * self.state.rng.gauss(1.0, 0.05)
         error_rate = (
             max(0.0, min(1.0, (utilization_per_pod - 0.95) * 2))
             if utilization_per_pod > 0.95

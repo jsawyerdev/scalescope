@@ -15,6 +15,7 @@ from scalescope.k8s_collector import (
     KubernetesObservationCollector,
     KubernetesUnavailableError,
     KubernetesWorkloadTarget,
+    PrometheusQueries,
     _parse_prometheus_gauges,
     _parse_quantity,
     _selector_matches,
@@ -264,7 +265,9 @@ class _FakePromResponse:
 
 
 def _prometheus_collector(
-    deployments: list[SimpleNamespace], pods: list[SimpleNamespace]
+    deployments: list[SimpleNamespace],
+    pods: list[SimpleNamespace],
+    queries: PrometheusQueries | None = None,
 ) -> KubernetesObservationCollector:
     with (
         patch("scalescope.k8s_collector.load_k8s_config", return_value="kubeconfig"),
@@ -281,7 +284,7 @@ def _prometheus_collector(
         }
         return KubernetesObservationCollector(
             prometheus_url="http://prometheus:9090/",
-            prometheus_rps_query="sum by (namespace, pod) (rate(x[2m]))",
+            prometheus_queries=queries or PrometheusQueries(request_rate="rps"),
         )
 
 
@@ -325,7 +328,7 @@ def test_one_prometheus_query_attributes_pod_rates_to_deployments(
     assert calls == [
         (
             "http://prometheus:9090/api/v1/query",
-            {"query": "sum by (namespace, pod) (rate(x[2m]))"},
+            {"query": "rps"},
         )
     ]
     assert rows["payments:api"]["request_rate"] == 15.0
@@ -354,3 +357,59 @@ def test_request_rate_is_zero_without_a_matching_prometheus_series(
     (row,) = collector.collect(("payments",)).rows
 
     assert row["request_rate"] == 0.0
+
+
+def test_prometheus_signals_aggregate_per_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    per_query = {
+        "rps": [("api-1", "10"), ("api-2", "30")],
+        "throttled": [("api-1", "0.1"), ("api-2", "0.3")],
+        "latency": [("api-1", "40"), ("api-2", "90")],
+        "errors": [("api-1", "0.0"), ("api-2", "0.02")],
+    }
+    queried: list[str] = []
+
+    def fake_get(url: str, params: dict[str, str], timeout: float) -> object:
+        queried.append(params["query"])
+        result = [_series("payments", pod, v) for pod, v in per_query[params["query"]]]
+        return _FakePromResponse({"data": {"result": result}})
+
+    monkeypatch.setattr("scalescope.k8s_collector.httpx.get", fake_get)
+    collector = _prometheus_collector(
+        [_deployment("payments", "api")],
+        [_pod("api-1", {"app": "api"}), _pod("api-2", {"app": "api"})],
+        PrometheusQueries(
+            request_rate="rps",
+            throttled_fraction="throttled",
+            latency_p95_ms="latency",
+            error_rate="errors",
+        ),
+    )
+
+    (row,) = collector.collect(("payments",)).rows
+
+    assert sorted(queried) == ["errors", "latency", "rps", "throttled"]
+    assert row["request_rate"] == 40.0  # rates add up
+    assert row["cpu_throttled_pct"] == 20.0  # fractions average
+    assert row["latency_p95_ms"] == 90.0  # the slowest pod
+    assert row["error_rate"] == 0.01
+
+
+def test_empty_prometheus_queries_are_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    queried: list[str] = []
+
+    def fake_get(url: str, params: dict[str, str], timeout: float) -> object:
+        queried.append(params["query"])
+        return _FakePromResponse({"data": {"result": []}})
+
+    monkeypatch.setattr("scalescope.k8s_collector.httpx.get", fake_get)
+    collector = _prometheus_collector(
+        [_deployment("payments", "api")],
+        [_pod("api-1", {"app": "api"})],
+        PrometheusQueries(request_rate="rps", latency_p95_ms=""),
+    )
+
+    collector.collect(("payments",))
+
+    assert queried == ["rps"]
