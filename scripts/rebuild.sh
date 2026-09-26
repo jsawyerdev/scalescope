@@ -54,9 +54,14 @@ if [ -f "$ENV_FILE" ]; then
     AUTH_PASSWORD="$(awk -F= '$1 == "SCALESCOPE_AUTH_PASSWORD" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE")"
 fi
 
+# Credentials reach curl as a config file on stdin, never argv, so they do
+# not show up in the process list. Config strings escape \ and ".
 curl_auth() {
     if [ -n "$AUTH_USERNAME" ] && [ -n "$AUTH_PASSWORD" ]; then
-        curl -u "$AUTH_USERNAME:$AUTH_PASSWORD" "$@"
+        credentials="$AUTH_USERNAME:$AUTH_PASSWORD"
+        credentials="${credentials//\\/\\\\}"
+        credentials="${credentials//\"/\\\"}"
+        printf 'user = "%s"\n' "$credentials" | curl -K - "$@"
     else
         curl "$@"
     fi

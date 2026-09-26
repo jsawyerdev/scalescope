@@ -34,6 +34,12 @@ Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 - `scripts/generate-observer-kubeconfig.sh` creates the kubeconfig
   owner-only from the start instead of briefly exposing the token under the
   default umask.
+- The dashboard's actuation row is hidden outside actuation mode as its
+  tooltip promises (component CSS was overriding the `hidden` attribute),
+  and the chart uses the bundled DejaVu Sans Mono font like the rest of the
+  page.
+- Baseline forecasts from a single observation get the same 1.0 minimum
+  band as every other history instead of a zero-width one.
 
 ### Changed
 
@@ -50,6 +56,8 @@ Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
   diagnosis window/threshold literals are named constants.
 - `scripts/rebuild.sh` runs the configured `mypy` gate alongside formatting,
   lint, and tests.
+- `scripts/rebuild.sh` passes Basic Auth credentials to its smoke-test curls
+  on stdin instead of the command line, keeping them out of `ps`.
 
 ## [0.11.1]
 

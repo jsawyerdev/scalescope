@@ -539,6 +539,7 @@ function updateChart(observations, forecast, allForecasts, modelNames, confidenc
   }
 
   if (!chart) {
+    Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
     const ctx = document.getElementById("request-rate-chart").getContext("2d");
     chart = new Chart(ctx, {
       type: "line",

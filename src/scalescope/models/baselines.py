@@ -19,10 +19,10 @@ def _spread(
 
 
 def _residual_std(history: np.ndarray) -> float:
+    """Std of first differences, floored at 1.0 so a band never collapses to zero."""
     if len(history) < 2:
-        return float(np.std(history)) if len(history) else 1.0
-    diffs = np.diff(history)
-    return float(np.std(diffs)) or 1.0
+        return 1.0
+    return float(np.std(np.diff(history))) or 1.0
 
 
 class NaiveModel:

@@ -6,6 +6,11 @@
   font-display: swap;
 }
 
+/* Component display rules must not override the `hidden` attribute. */
+[hidden] {
+  display: none !important;
+}
+
 :root {
   --bg: #f5f7fa;
   --surface: #ffffff;
