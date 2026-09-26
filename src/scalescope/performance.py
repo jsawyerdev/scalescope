@@ -49,6 +49,7 @@ class LatencyModel:
     r_squared: float
 
     def latency_ms(self, load_rps: float) -> float:
+        """Predicted p95 at `load_rps`; defined only below `saturation_rps`."""
         headroom = self.saturation_rps - load_rps
         return self.base_ms + self.queueing_coefficient / headroom
 

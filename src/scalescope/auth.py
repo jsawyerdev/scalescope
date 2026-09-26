@@ -3,7 +3,7 @@
 Applied as ASGI middleware, not a FastAPI route dependency, because a route
 dependency would leave the StaticFiles-mounted dashboard (index.html/app.js/
 style.css) unprotected while only guarding /api/*. `/healthz` is exempt so
-the Docker HEALTHCHECK keeps working without credentials.
+the Docker HEALTHCHECK and Kubernetes probes work without credentials.
 """
 
 from __future__ import annotations

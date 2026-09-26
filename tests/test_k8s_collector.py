@@ -396,6 +396,30 @@ def test_prometheus_signals_aggregate_per_deployment(
     assert row["error_rate"] == 0.01
 
 
+def test_several_series_for_one_pod_use_each_signals_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Two containers in one pod, each with its own series.
+    per_query = {"rps": ["10", "5"], "latency": ["40", "90"]}
+
+    def fake_get(url: str, params: dict[str, str], timeout: float) -> object:
+        values = per_query[params["query"]]
+        result = [_series("payments", "api-1", value) for value in values]
+        return _FakePromResponse({"data": {"result": result}})
+
+    monkeypatch.setattr("scalescope.k8s_collector.httpx.get", fake_get)
+    collector = _prometheus_collector(
+        [_deployment("payments", "api")],
+        [_pod("api-1", {"app": "api"})],
+        PrometheusQueries(request_rate="rps", latency_p95_ms="latency"),
+    )
+
+    (row,) = collector.collect(("payments",)).rows
+
+    assert row["request_rate"] == 15.0
+    assert row["latency_p95_ms"] == 90.0  # not 130: latencies do not add
+
+
 def test_empty_prometheus_queries_are_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
     queried: list[str] = []
 

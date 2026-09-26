@@ -142,8 +142,8 @@ class Settings:
     # Opt-in on top of mode=observe: observing a cluster must never imply
     # writing to it by default.
     actuate: bool = field(default_factory=lambda: _bool_env("SCALESCOPE_ACTUATE"))
-    # Requests/s one pod serves at 100% of its CPU request. Unset -> estimated
-    # per workload from its own history.
+    # Requests/s one pod serves at 100% of its CPU request. Unset -> measured
+    # per workload from its latency curve or CPU history.
     capacity_per_pod_rps: float | None = field(
         default_factory=lambda: _optional_float_env("SCALESCOPE_CAPACITY_PER_POD_RPS")
     )
@@ -180,8 +180,8 @@ class Settings:
     latency_slo_ms: float | None = field(
         default_factory=lambda: _optional_float_env("SCALESCOPE_LATENCY_SLO_MS")
     )
-    # Optional per-workload demand source for OBSERVE mode: an instant query
-    # whose series carry `namespace` and `pod` labels.
+    # Optional per-pod signals for OBSERVE mode: one instant query each, whose
+    # series carry `namespace` and `pod` labels; an empty query is skipped.
     prometheus_url: str | None = field(
         default_factory=lambda: _optional_env("SCALESCOPE_PROMETHEUS_URL")
     )

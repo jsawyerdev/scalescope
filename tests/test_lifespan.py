@@ -111,3 +111,22 @@ def test_observe_loop_stores_rows_and_reports_partial_failures(
     assert store.workloads() == [target.workload_id]
     assert source["targets"][0]["id"] == target.workload_id
     assert source["last_error"] == "1 target(s) failed: checkout: pods unreachable"
+
+
+@pytest.mark.parametrize(
+    ("task_done", "status_code"), [(None, 200), (False, 200), (True, 503)]
+)
+def test_healthz_fails_once_the_data_source_task_stops(
+    monkeypatch: pytest.MonkeyPatch, task_done: bool | None, status_code: int
+) -> None:
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    if task_done is None:
+        monkeypatch.delitem(main.app_state, "data_source_task", raising=False)
+    else:
+        task = SimpleNamespace(done=lambda: task_done)
+        monkeypatch.setitem(main.app_state, "data_source_task", task)
+
+    assert TestClient(main.app).get("/healthz").status_code == status_code

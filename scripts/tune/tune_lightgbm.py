@@ -17,6 +17,7 @@ from ConfigSpace.hyperparameters import (
 )
 from smac import HyperparameterOptimizationFacade, Scenario
 
+from scalescope.demand import demand_history, demand_signal
 from scalescope.models.lightgbm_model import (
     LightGbmHyperparameters,
     LightGbmQuantileModel,
@@ -103,7 +104,8 @@ def _load_history(db_path: Path, workload: str) -> np.ndarray:
                 f"no observations found for workload {workload!r}; "
                 f"known workloads: {known}"
             )
-        return df["request_rate"].to_numpy()
+        # The series the app forecasts: request rate, or total CPU without it.
+        return demand_history(df, demand_signal(df))
     finally:
         store.close()
 

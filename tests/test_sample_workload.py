@@ -168,3 +168,16 @@ def test_trigger_endpoint_rejects_unknown_kind(sample_workload: Any) -> None:
     response = client.post("/trigger", params={"kind": "disk"})
 
     assert response.status_code == 400
+
+
+def test_leaving_a_manual_memory_leak_releases_it(sample_workload: Any) -> None:
+    leak = sample_workload._TRIGGER_PHASES["memory"]
+    idle = sample_workload._TIMELINE[0]
+    sample_workload._leak_buffer.extend(b"x" * 1024)
+    try:
+        sample_workload._enter_phase(idle, leak)
+        assert len(sample_workload._leak_buffer) == 1024
+        sample_workload._enter_phase(leak, idle)
+        assert len(sample_workload._leak_buffer) == 0
+    finally:
+        sample_workload._leak_buffer.clear()

@@ -60,12 +60,13 @@ class ScalingPolicy:
 
 @dataclass(frozen=True)
 class PodCapacity:
-    """Demand one pod serves at 100% of its CPU request, and where it came from.
+    """Demand one pod serves at full capacity, and where that figure came from.
 
-    In the demand signal's unit: requests/s, or CPU millicores. A latency
-    model also sets how full a pod may run (`target_utilization`, the load
-    that keeps p95 at `latency_target_ms` as a fraction of saturation);
-    otherwise the policy's target applies.
+    In the demand signal's unit: requests/s, or CPU millicores. Full capacity
+    is 100% of the CPU request, or saturation throughput for a latency model.
+    A latency model also sets how full a pod may run (`target_utilization`,
+    the load that keeps p95 at `latency_target_ms` as a fraction of
+    saturation); otherwise the policy's target applies.
     """
 
     per_pod: float | None
@@ -73,6 +74,10 @@ class PodCapacity:
     target_utilization: float | None = None
     latency_model: LatencyModel | None = None
     latency_target_ms: float | None = None
+
+    def utilization(self, policy: ScalingPolicy) -> float:
+        """How full each pod may run: the latency model's target, else the policy's."""
+        return self.target_utilization or policy.target_utilization
 
 
 @dataclass(frozen=True)
@@ -215,8 +220,7 @@ def recommend_replicas(
     recommended = current_replicas
     pods_needed: list[int] | None = None
     if capacity.per_pod is not None:
-        utilization = capacity.target_utilization or policy.target_utilization
-        safe_capacity_per_pod = capacity.per_pod * utilization
+        safe_capacity_per_pod = capacity.per_pod * capacity.utilization(policy)
 
         def pods_for(demand: float) -> int:
             required = math.ceil(demand / safe_capacity_per_pod)

@@ -4,6 +4,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.14.1]
+
+### Fixed
+
+- `/healthz` returns 503 once the data-source loop has stopped (the
+  Kubernetes client could not be created at startup, or the loop crashed),
+  so the kubelet restarts the pod. It previously kept answering 200, leaving
+  a pod that collected nothing and never restarted.
+- The memory-leak diagnosis judges "flat" against the workload's demand
+  signal. Workloads without request metrics report a request rate of 0,
+  which always read as flat, so memory growing with CPU load was diagnosed
+  as a leak and blocked actuation.
+- Switching workloads clears the replay panels, and responses for a
+  workload no longer selected are discarded instead of rendered.
+- Baseline forecasts never go below 0, so p10 can no longer exceed p50.
+- Several Prometheus series for one pod (one per container, say) are
+  combined by each signal's rule; latencies and ratios were summed.
+- The sample workload's `/trigger?kind=memory` releases its memory when the
+  trigger ends; only the scheduled leak phase did.
+- `scripts/tune` tunes on the series the app forecasts (total CPU when a
+  workload has no request rate), not always on request rate.
+
+### Changed
+
+- The sample workload image runs Python 3.14, the version it is tested on.
+- `starlette` and `urllib3`, imported directly, are declared dependencies.
+- Removed stale mypy overrides for packages that ship type information, an
+  unused element id, and outdated comments and docstrings.
+
 ## [0.14.0]
 
 ### Added

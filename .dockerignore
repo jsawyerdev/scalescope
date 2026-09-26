@@ -8,3 +8,8 @@ __pycache__
 .ruff_cache
 .pytest_cache
 *.duckdb
+# Local credentials and operator tooling never belong in a build context.
+.env
+*.kubeconfig
+scripts/tune/.venv-tune
+scripts/tune/output

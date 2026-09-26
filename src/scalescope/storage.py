@@ -80,8 +80,8 @@ class Store:
     """Owns the DuckDB connection and schema for one ScaleScope instance.
 
     DuckDB connections are not safe for concurrent use from multiple threads;
-    FastAPI runs sync route handlers in a thread pool while the simulation
-    loop writes from the event-loop thread, so every access to `_conn` must
+    FastAPI runs sync route handlers in a thread pool and the data-source
+    loops write through `asyncio.to_thread`, so every access to `_conn` must
     go through `_lock`.
     """
 

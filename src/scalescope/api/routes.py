@@ -206,9 +206,7 @@ def _compute_recommendation(
         "demand_signal": signal,
         "capacity_per_pod": capacity.per_pod,
         "capacity_source": capacity.source,
-        "target_utilization": (
-            capacity.target_utilization or settings.target_utilization
-        ),
+        "target_utilization": capacity.utilization(settings.scaling_policy),
         "latency_model": _capacity_summary(capacity),
         "hold_reason": rec.hold_reason,
         "pods_needed": rec.pods_needed,
