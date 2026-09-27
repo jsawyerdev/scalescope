@@ -31,7 +31,9 @@ def test_lifespan_awaits_background_task_before_closing_store(
         finally:
             events.append("task_cancelled")
 
-    async def fake_history_loop(store: FakeStore, learner: object) -> None:
+    async def fake_history_loop(
+        store: FakeStore, learner: object, planner: object
+    ) -> None:
         await asyncio.Future()
 
     async def run_lifespan() -> None:
@@ -57,7 +59,12 @@ def test_observe_loop_stores_rows_and_reports_partial_failures(
 ) -> None:
     from datetime import UTC, datetime
 
-    from scalescope.k8s_collector import CollectionResult, KubernetesWorkloadTarget
+    from scalescope.k8s_collector import (
+        CollectionResult,
+        KubernetesUnavailableError,
+        KubernetesWorkloadTarget,
+        NodeCollection,
+    )
     from scalescope.learning import Learner
     from scalescope.storage import Store
 
@@ -92,6 +99,10 @@ def test_observe_loop_stores_rows_and_reports_partial_failures(
                 targets=[target], rows=[row], errors=["checkout: pods unreachable"]
             )
 
+        def collect_nodes(self, minute: datetime) -> NodeCollection:
+            # Namespace-scoped RBAC: nodes are not visible.
+            raise KubernetesUnavailableError("nodes forbidden")
+
     store = Store(str(tmp_path / "observe.duckdb"))
     original_state = dict(main.app_state)
     monkeypatch.setattr(
@@ -120,6 +131,8 @@ def test_observe_loop_stores_rows_and_reports_partial_failures(
     assert store.workloads() == [target.workload_id]
     assert source["targets"][0]["id"] == target.workload_id
     assert source["last_error"] == "1 target(s) failed: checkout: pods unreachable"
+    # Unreadable nodes are reported, and do not stop workload observation.
+    assert source["nodes_error"] == "nodes forbidden"
 
 
 @pytest.mark.parametrize(
@@ -152,6 +165,7 @@ def test_one_workloads_training_failure_does_not_stop_the_others(
     from datetime import UTC, datetime
 
     from scalescope.learning import Learner
+    from scalescope.nodes import NodePlanner
     from scalescope.storage import Store
 
     store = Store(str(tmp_path / "retrain.duckdb"))
@@ -182,6 +196,15 @@ def test_one_workloads_training_failure_does_not_stop_the_others(
                 raise ValueError("bad history")
             trained.append(workload)
 
-    main._retrain_all(store, cast(Learner, FlakyLearner()))
+    class NoPlanner:
+        def refit(self, now: datetime) -> None:
+            pass
+
+        def refresh(self, now: datetime, log: bool = False) -> None:
+            pass
+
+    main._retrain_all(
+        store, cast(Learner, FlakyLearner()), cast(NodePlanner, NoPlanner())
+    )
 
     assert trained == ["healthy"]

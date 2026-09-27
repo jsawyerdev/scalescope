@@ -9,6 +9,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list"]
+  # Node pools: capacity, what pods request, and node start-up times.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
     verbs: ["get", "list"]

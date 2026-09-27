@@ -27,7 +27,7 @@ deployment choice:
   without auth, TLS, or a gateway in front is a deployment risk, not a
   vulnerability; see "Release security model" in the README.
 - **Cluster access is read-only by default.** The observer ClusterRole
-  allows only `get`/`list` on Deployments, Pods, and PodMetrics. Writing
+  allows only `get`/`list` on Deployments, Pods, Nodes, and PodMetrics. Writing
   replica counts requires both `k8s/scalescope-actuation/` RBAC and
   `SCALESCOPE_ACTUATE=true`, and only ever touches the `deployments/scale`
   subresource.

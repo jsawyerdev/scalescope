@@ -80,6 +80,39 @@
     <div class="chart-wrap small"><canvas id="pods-chart"></canvas></div>
   </section>
 
+  <section class="panel nodes">
+    <div class="panel-header">
+      <h2>Nodes</h2>
+      <span id="nodes-note" class="note">-</span>
+    </div>
+    <p id="nodes-headline" class="learning-headline">Checking node pools...</p>
+    <div id="nodes-body">
+      <p id="nodes-accuracy" class="decision-reason"></p>
+      <div class="facts">
+        <div class="fact"><span class="label">Nodes running</span><span id="fact-nodes" class="value">-</span></div>
+        <div class="fact"><span class="label hint" title="CPU the pods on this pool request, including pending pods, out of what its nodes can allocate.">CPU requested</span><span id="fact-node-cpu" class="value">-</span></div>
+        <div class="fact"><span class="label hint" title="Nodes the busy-case (p90) forecast of requests needs within the forecast horizon, at the packing this pool achieves.">Needed, next hour</span><span id="fact-node-peak" class="value">-</span></div>
+        <div class="fact"><span class="label hint" title="Node-hours in the last 24 hours beyond what the pods' requests needed at this pool's usual packing.">Idle node-hours, 24h</span><span id="fact-node-idle" class="value">-</span></div>
+      </div>
+      <div class="chart-wrap small"><canvas id="nodes-chart"></canvas></div>
+      <div id="pools-wrap" class="table-wrap" hidden>
+        <table>
+          <thead>
+            <tr>
+              <th>Pool</th>
+              <th class="num">Nodes</th>
+              <th class="num hint" title="Nodes the pods' requests need now, at this pool's usual packing.">Needed now</th>
+              <th class="num hint" title="Most nodes the busy-case forecast needs in the next hour.">Needed, next hour</th>
+              <th class="num">Idle node-hours, 24h</th>
+            </tr>
+          </thead>
+          <tbody id="pools-body"></tbody>
+        </table>
+      </div>
+      <p id="nodes-footnote" class="footnote"></p>
+    </div>
+  </section>
+
   <section class="panel try">
     <div class="panel-header">
       <h2>Load triggers</h2>

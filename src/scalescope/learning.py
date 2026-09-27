@@ -155,6 +155,12 @@ class Learner:
             self._forecasts[workload] = (signal, minute, forecast)
         return forecast
 
+    def trained_signal(self, workload: str) -> DemandSignal | None:
+        """The signal `workload`'s model forecasts, or None before training."""
+        with self._lock:
+            trained = self._models.get(workload)
+        return trained.signal if trained else None
+
     def learned_capacity(
         self, workload: str, signal: DemandSignal
     ) -> PodCapacity | None:

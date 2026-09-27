@@ -38,14 +38,14 @@ counts. It changes a Deployment only when you turn on actuation (step 5).
 Straight from GitHub, no clone needed:
 
 ```sh
-kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.16.1"
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.17.0"
 kubectl -n scalescope-system rollout status deployment/scalescope
 ```
 
 Or from a clone: `kubectl apply -k k8s/scalescope`.
 
 This creates the `scalescope-system` namespace, a ServiceAccount with
-**read-only** cluster-wide access to Deployments, Pods, and pod metrics, a
+**read-only** cluster-wide access to Deployments, Pods, Nodes, and pod metrics, a
 1Gi volume for history, the Deployment (one replica), and a `ClusterIP`
 Service. It observes every Deployment the ServiceAccount can read.
 
@@ -68,6 +68,10 @@ Open http://localhost:8000 and pick a workload. From the top:
    6 hours with the next hour's forecast.
 4. **Demand forecast and pods**: recent demand, the forecast, and pods
    running vs needed.
+5. **Nodes**: the node pool this workload runs on: nodes running, nodes
+   its pods' requests need now and over the next hour, idle node-hours in
+   the last day, and how long new nodes take to become Ready. Advisory:
+   ScaleScope never adds or removes nodes.
 
 Give each workload a few minutes of history. When demand is a request rate,
 ScaleScope first measures how much one pod handles: from the workload's
@@ -109,11 +113,13 @@ kubectl -n scalescope-system set env deployment/scalescope \
 | `SCALESCOPE_MIN_REPLICAS`, `SCALESCOPE_MAX_REPLICAS` | Bounds on every recommendation (default 1 and 30). |
 | `SCALESCOPE_TARGET_UTILIZATION` | How full each pod may run (default 0.70). |
 | `SCALESCOPE_K8S_NAMESPACES` | Comma-separated namespaces to observe; `*` (the default in the manifest) means all readable ones. |
+| `SCALESCOPE_NODE_POOL_LABEL` | The node label that names each node's pool, if yours is not one of the Karpenter, EKS, GKE, AKS, or DigitalOcean pool labels read by default. |
 
 The full list is in the main README's "Run it" table.
 
 **Narrower visibility.** To limit ScaleScope to some namespaces, replace the
-cluster-wide binding with one RoleBinding per namespace:
+cluster-wide binding with one RoleBinding per namespace. Nodes are not
+namespaced, so this also turns off node forecasts:
 
 ```sh
 kubectl delete clusterrolebinding scalescope-observer
@@ -186,7 +192,7 @@ exposes request-rate, latency, and error metrics, so you can watch every
 part of ScaleScope work.
 
 ```sh
-kubectl apply -k "https://github.com/jsawyerdev/scalescope//sample-workload/k8s?ref=v0.16.1"
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//sample-workload/k8s?ref=v0.17.0"
 
 # give ScaleScope the sample's own metrics (request rate, latency, errors)
 kubectl -n scalescope-system set env deployment/scalescope \
@@ -239,7 +245,7 @@ kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v
 Uninstall (this also deletes the namespace and its history volume):
 
 ```sh
-kubectl delete -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.16.1"
+kubectl delete -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.17.0"
 kubectl delete -f k8s/scalescope-actuation/ --ignore-not-found
 ```
 
@@ -252,10 +258,11 @@ kubectl delete -f k8s/scalescope-actuation/ --ignore-not-found
 | A workload is missing from the list | It is outside `SCALESCOPE_K8S_NAMESPACES` or the ServiceAccount's RBAC. |
 | "Hold at N pods", with "How much one pod can handle is not known yet" | No CPU request on the Deployment and no request-rate history to measure from. Add a CPU request, or set `SCALESCOPE_CAPACITY_PER_POD_RPS`. |
 | Capacity never comes from the latency curve | No latency per pod (Prometheus latency query returns nothing: check the metric name), or the workload has only run in a narrow band of load per pod, so the curve's bend is not visible. ScaleScope then sizes from CPU. |
+| Nodes panel: "could not list nodes and pods cluster-wide" | The install is namespace-scoped (a RoleBinding per namespace), which cannot grant access to nodes. Node forecasts need the cluster-wide `scalescope-observer` ClusterRoleBinding; everything else works without it. |
 | "Learning the daily pattern" | Normal for the first day: the long-memory forecast starts after a day of history, and the weekly pattern after a week. Until then scaling uses the short-term forecast. History survives restarts (it is on the volume). |
 | The volume fills up | Minute history takes about 7 MB per workload at the default 35 days; raw observations are kept 24 hours. Lower `SCALESCOPE_HISTORY_RETENTION_DAYS` or give the PVC more space. |
 | Scaling replay says "not enough history yet" | It needs about 90 observations (a third to measure capacity, the rest to replay). |
 | Demand stays at 0 | metrics-server is missing or cannot be read (logs say `metrics.k8s.io unavailable`); `kubectl top pods` must work. |
 | "Scaling will not fix this" | The diagnosis found a cause more pods would not solve (CPU throttling, a probable memory leak, pods stuck pending). The status line says which. |
 | Autoscaling shows "refusing to write" | A HorizontalPodAutoscaler targets the Deployment. Delete it or turn actuation off. |
-| `ImagePullBackOff` | The cluster cannot reach `ghcr.io`; mirror the image to a reachable registry and set it with a kustomize overlay (`kustomize edit set image ghcr.io/jsawyerdev/scalescope=<your-registry>/scalescope:0.16.1`). |
+| `ImagePullBackOff` | The cluster cannot reach `ghcr.io`; mirror the image to a reachable registry and set it with a kustomize overlay (`kustomize edit set image ghcr.io/jsawyerdev/scalescope=<your-registry>/scalescope:0.17.0`). |

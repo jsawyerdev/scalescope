@@ -1,6 +1,6 @@
 [project]
 name = "scalescope"
-version = "0.16.1"
+version = "0.17.0"
 description = "Explainable predictive autoscaling for Kubernetes: forecasts demand, sizes pods from each workload's latency curve, and says when scaling will not help"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
@@ -85,6 +85,7 @@ files = [
     "scripts/tune",
     "scripts/release_notes.py",
     "scripts/eval_long_memory.py",
+    "scripts/eval_node_forecast.py",
 ]
 warn_return_any = true
 warn_unused_ignores = true

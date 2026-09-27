@@ -26,7 +26,7 @@ spec:
       containers:
         - name: scalescope
           # Published by .github/workflows/image.yml (amd64 and arm64).
-          image: ghcr.io/jsawyerdev/scalescope:0.16.1
+          image: ghcr.io/jsawyerdev/scalescope:0.17.0
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
@@ -52,6 +52,10 @@ spec:
             # http://prometheus-server.monitoring.svc:9090
             # - name: SCALESCOPE_PROMETHEUS_URL
             #   value: ""
+            # Node pools are read from the usual managed-cluster labels
+            # (Karpenter, EKS, GKE, AKS, DigitalOcean); name another here.
+            # - name: SCALESCOPE_NODE_POOL_LABEL
+            #   value: my-pool-label
             # Actuation writes replicas for one Deployment; set both of these
             # to it and apply k8s/scalescope-actuation/ before enabling.
             # - name: SCALESCOPE_K8S_NAMESPACE
