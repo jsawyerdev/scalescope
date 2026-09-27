@@ -23,7 +23,7 @@ spec:
       containers:
         - name: sample-workload
           # Published by .github/workflows/image.yml (amd64 and arm64).
-          image: ghcr.io/jsawyerdev/scalescope-sample-workload:0.16.0
+          image: ghcr.io/jsawyerdev/scalescope-sample-workload:0.16.1
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

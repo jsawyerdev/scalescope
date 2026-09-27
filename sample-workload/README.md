@@ -43,7 +43,7 @@ Routes:
   pattern immediately. `stress` bypasses the timeline and starts one
   bounded multiprocessing worker repeatedly computing Pi digits until the
   bounded duration expires. This is what ScaleScope's dashboard
-  "Generate load" buttons call in OBSERVE mode (proxied through
+  "Load triggers" buttons call in OBSERVE mode (proxied through
   `POST /api/workloads/{name}/trigger` on the ScaleScope side); call it
   directly here for a quick manual check without going through ScaleScope
   at all: `curl -X POST 'http://<service-ip>/trigger?kind=stress&duration_seconds=30'`.
@@ -57,7 +57,7 @@ The image is published (amd64/arm64) as
 `ghcr.io/jsawyerdev/scalescope-sample-workload`, so no build is needed:
 
 ```
-kubectl apply -k "https://github.com/jsawyerdev/scalescope//sample-workload/k8s?ref=v0.16.0"
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//sample-workload/k8s?ref=v0.16.1"
 # or, from a clone:
 kubectl apply -k sample-workload/k8s
 ```

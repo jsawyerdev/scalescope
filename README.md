@@ -157,7 +157,7 @@ Requirements: metrics-server (most managed clusters ship it), and CPU
 requests on the Deployments you want recommendations for.
 
 ```
-kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.16.0"
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.16.1"
 kubectl -n scalescope-system port-forward svc/scalescope 8000:80
 ```
 
@@ -595,8 +595,9 @@ docker compose up --build
 Then open http://localhost:8000. A synthetic workload (`sample-app`) starts
 generating observations immediately; the dashboard begins populating within a
 few seconds. Data persists in the `scalescope-data` volume across restarts.
-The dashboard ships its own DejaVu Sans Mono Regular font and uses that same
-face for labels, tables, charts, and metric values.
+The dashboard reads in the platform's own sans-serif font and shows values,
+identifiers, and tables in its bundled DejaVu Sans Mono, so nothing is
+fetched from the internet.
 
 Environment variables (see `src/scalescope/config.py`):
 
@@ -905,7 +906,7 @@ See `sample-workload/README.md` for build/push/deploy instructions.
 
 ## On-demand load triggers
 
-The dashboard's "Generate load" buttons call `POST /api/workloads/{name}/trigger`,
+The dashboard's "Load triggers" buttons call `POST /api/workloads/{name}/trigger`,
 which forces a pattern immediately instead of waiting for it to occur
 naturally, so its effect on the metrics and diagnosis is visible within a
 few ticks. The route branches on `SCALESCOPE_MODE` (from `api/routes.py`'s
@@ -971,7 +972,7 @@ triggers require that variable to be set.
 - `POST /api/workloads/{name}/trigger?kind={cpu|memory|traffic|stress}&duration_seconds=45` — force a load
   pattern now (DEMO: the local simulator; OBSERVE: proxied to the real workload's own `/trigger`,
   requires `SCALESCOPE_K8S_METRICS_URL`; `stress` is OBSERVE-only) — what the dashboard's
-  "Generate load" buttons call
+  "Load triggers" buttons call
 
 ## Develop locally
 

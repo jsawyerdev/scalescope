@@ -16,10 +16,10 @@
     <select id="workload-select"></select>
   </label>
   <div class="topbar-field">
-    <span class="label hint" title="DEMO: a simulated workload, no cluster. OBSERVE: reading a real Kubernetes cluster.">Mode</span>
-    <span id="mode-badge" class="tag">-</span>
+    <span class="label hint" title="Demo: a simulated workload, no cluster. Observe: reading a real Kubernetes cluster.">Mode</span>
+    <span id="mode-text">-</span>
   </div>
-  <div class="topbar-field">
+  <div class="topbar-field" id="data-item" hidden>
     <span class="label">Data</span>
     <span class="inline"><span id="source-conn-dot" class="dot"></span><span id="source-conn-text">-</span></span>
   </div>
@@ -27,7 +27,7 @@
     <span class="label hint" title="ScaleScope writes the recommended pod count to the cluster. It refuses if a HorizontalPodAutoscaler already manages the Deployment.">Autoscaling</span>
     <span class="inline"><span id="actuation-dot" class="dot"></span><span id="actuation-text">-</span></span>
   </div>
-  <span id="version-text" class="version">-</span>
+  <span id="version-text" class="version data"></span>
 </header>
 
 <main class="page">
@@ -82,8 +82,8 @@
 
   <section class="panel try">
     <div class="panel-header">
-      <h2>Try it</h2>
-      <span class="note">force a load pattern and watch the recommendation react</span>
+      <h2>Load triggers</h2>
+      <span class="note">Force a load pattern on the workload and watch the recommendation react.</span>
     </div>
     <div class="try-row">
       <label class="inline">
@@ -97,15 +97,15 @@
       <button class="button trigger-btn" data-kind="traffic">Spike traffic</button>
       <button class="button trigger-btn" data-kind="cpu">Spike CPU</button>
       <button class="button trigger-btn" data-kind="memory">Leak memory</button>
-      <button class="button trigger-btn" data-kind="stress" title="OBSERVE mode only">Stress CPU</button>
-      <span id="trigger-status" class="note">no trigger active</span>
+      <button class="button trigger-btn" data-kind="stress" title="Observe mode only: stresses the real workload.">Stress CPU</button>
+      <span id="trigger-status" aria-live="polite"></span>
     </div>
   </section>
 
   <details class="panel details">
     <summary>Engineering details</summary>
 
-    <h3>Latest observation</h3>
+    <div class="section-header"><h3>Latest observation</h3></div>
     <div class="grid stats">
       <div class="cell"><span class="label">Pods</span><span class="value" id="stat-replicas">-</span></div>
       <div class="cell"><span class="label">Requests/s</span><span class="value" id="stat-request-rate">-</span></div>
@@ -118,7 +118,7 @@
       <div class="cell"><span class="label">Restarts</span><span class="value" id="stat-restarts">-</span></div>
     </div>
 
-    <h3>Data source</h3>
+    <div class="section-header"><h3>Data source</h3></div>
     <div class="grid">
       <div class="cell"><span class="label">Cluster</span><span class="value" id="cluster-server-text">-</span></div>
       <div class="cell"><span class="label">Identity</span><span class="value" id="cluster-auth-text">-</span></div>
@@ -126,7 +126,7 @@
       <div class="cell"><span class="label">Deployments</span><span class="value" id="cluster-target-count-text">-</span></div>
     </div>
 
-    <h3>Forecast by step <span id="forecast-ramp-model" class="note">-</span></h3>
+    <div class="section-header"><h3>Forecast by step</h3><span id="forecast-ramp-model" class="note"></span></div>
     <div class="table-wrap">
       <table>
         <thead>
@@ -142,7 +142,7 @@
       </table>
     </div>
 
-    <h3>Model comparison <span class="note">click a model to view its forecast</span></h3>
+    <div class="section-header"><h3>Model comparison</h3><span class="note">Select a model to view its forecast.</span></div>
     <div class="table-wrap">
       <table>
         <thead>
@@ -159,7 +159,7 @@
       </table>
     </div>
 
-    <h3>Replay lab <button id="replay-run-btn" class="button">Run replay</button></h3>
+    <div class="section-header"><h3>Replay lab</h3><button id="replay-run-btn" class="button">Run replay</button></div>
     <p class="note">Each model re-forecasts past points using only the data it had then, scored against what happened next. Sorted best first by busy-case (p90) error, since that is what sizes pods.</p>
     <div class="table-wrap">
       <table>
@@ -176,9 +176,9 @@
         <tbody id="replay-table-body"></tbody>
       </table>
     </div>
-    <span id="replay-status" class="note">-</span>
+    <p id="replay-status" class="note" aria-live="polite">Not run yet.</p>
 
-    <h3>Scaling replay <button id="scaling-replay-btn" class="button">Run scaling replay</button></h3>
+    <div class="section-header"><h3>Scaling replay</h3><button id="scaling-replay-btn" class="button">Run scaling replay</button></div>
     <p class="note">Replays this workload's recorded demand through ScaleScope and through a standard reactive Kubernetes HPA, with the same pod capacity and start-up delay. Neither sees the future.</p>
     <div class="table-wrap">
       <table>
@@ -193,9 +193,9 @@
         <tbody id="scaling-replay-body"></tbody>
       </table>
     </div>
-    <span id="scaling-replay-status" class="note">-</span>
+    <p id="scaling-replay-status" class="note" aria-live="polite">Not run yet.</p>
 
-    <h3>Raw observations <span class="note">last 40, newest first</span></h3>
+    <div class="section-header"><h3>Raw observations</h3><span class="note">Last 40, newest first.</span></div>
     <div class="table-wrap log-wrap">
       <table>
         <thead>

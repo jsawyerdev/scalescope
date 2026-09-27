@@ -35,7 +35,7 @@ counts. It changes a Deployment only when you turn on actuation (step 5).
 Straight from GitHub, no clone needed:
 
 ```sh
-kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.16.0"
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.16.1"
 kubectl -n scalescope-system rollout status deployment/scalescope
 ```
 
@@ -183,7 +183,7 @@ exposes request-rate, latency, and error metrics, so you can watch every
 part of ScaleScope work.
 
 ```sh
-kubectl apply -k "https://github.com/jsawyerdev/scalescope//sample-workload/k8s?ref=v0.16.0"
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//sample-workload/k8s?ref=v0.16.1"
 
 # give ScaleScope the sample's own metrics (request rate, latency, errors)
 kubectl -n scalescope-system set env deployment/scalescope \
@@ -192,7 +192,7 @@ kubectl -n scalescope-system set env deployment/scalescope \
   SCALESCOPE_K8S_METRICS_URL=http://sample-workload.scalescope-demo.svc.cluster.local/metrics
 ```
 
-Select `scalescope-demo/sample-workload` in the dashboard and use **Try it**
+Select `scalescope-demo/sample-workload` in the dashboard and use **Load triggers**
 ("Spike traffic", "Stress CPU") to force a load pattern: the recommendation
 should turn to "Add N pods" within a few ticks and back once it ends.
 
@@ -236,7 +236,7 @@ kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v
 Uninstall (this also deletes the namespace and its history volume):
 
 ```sh
-kubectl delete -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.16.0"
+kubectl delete -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.16.1"
 kubectl delete -f k8s/scalescope-actuation/ --ignore-not-found
 ```
 
@@ -255,4 +255,4 @@ kubectl delete -f k8s/scalescope-actuation/ --ignore-not-found
 | Demand stays at 0 | metrics-server is missing or cannot be read (logs say `metrics.k8s.io unavailable`); `kubectl top pods` must work. |
 | "Scaling will not fix this" | The diagnosis found a cause more pods would not solve (CPU throttling, a probable memory leak, pods stuck pending). The status line says which. |
 | Autoscaling shows "refusing to write" | A HorizontalPodAutoscaler targets the Deployment. Delete it or turn actuation off. |
-| `ImagePullBackOff` | The cluster cannot reach `ghcr.io`; mirror the image to a reachable registry and set it with a kustomize overlay (`kustomize edit set image ghcr.io/jsawyerdev/scalescope=<your-registry>/scalescope:0.16.0`). |
+| `ImagePullBackOff` | The cluster cannot reach `ghcr.io`; mirror the image to a reachable registry and set it with a kustomize overlay (`kustomize edit set image ghcr.io/jsawyerdev/scalescope=<your-registry>/scalescope:0.16.1`). |
