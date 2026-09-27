@@ -11,7 +11,7 @@ runs that alongside a deterministic diagnosis engine that flags when scaling is
 the wrong response (CPU limit throttling, memory leak, node capacity exhaustion,
 HPA ceiling, non-CPU bottleneck).
 
-## Status: v0.15.0 (sizes pods from each workload's own latency curve, a queueing model fitted from its history; replays scaling decisions against a reactive HPA; throttling, latency, and errors for every workload from Prometheus)
+## Status: v0.15.1 (sizes pods from each workload's own latency curve, a queueing model fitted from its history; replays scaling decisions against a reactive HPA; throttling, latency, and errors for every workload from Prometheus)
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed at each version.
 
@@ -63,7 +63,7 @@ Requirements: metrics-server (most managed clusters ship it), and CPU
 requests on the Deployments you want recommendations for.
 
 ```
-kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.15.0"
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.15.1"
 kubectl -n scalescope-system port-forward svc/scalescope 8000:80
 ```
 
