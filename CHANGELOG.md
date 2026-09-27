@@ -6,6 +6,13 @@ Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 
 ## [Unreleased]
 
+### Added
+
+- Docs: which signals the forecast models learn from (request rate, else
+  total CPU; never memory) and what the others are used for; a "Pods,
+  nodes, and cost" section on pairing ScaleScope with a node autoscaler;
+  the dependency list; single-replica and node-scaling limitations.
+
 ### Fixed
 
 - Docs caught up with 0.16.x: the README status no longer names an old
