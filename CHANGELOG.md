@@ -4,6 +4,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.16.1]
+
+### Changed
+
+- Dashboard typography: prose is set in the platform's sans-serif font; the
+  bundled DejaVu Sans Mono is kept for values, identifiers, and tables.
+  Headings, labels, and table headers are sentence case instead of spaced
+  uppercase, on one type scale with one control height.
+- The status line says each thing once: its detail appears only when it adds
+  something the recommendation does not (a connection error, stale data, a
+  diagnosis). "All good" is a neutral banner; amber and red are tinted.
+- Plain text instead of badges: the mode reads "Demo" or "Observe", the
+  version "v0.16.1". The data-connection item is shown only in Observe mode,
+  where it can change. Idle placeholders ("no trigger active", "-") are gone;
+  replay panels say "Not run yet."
+- "Try it" is now "Load triggers", matching what the buttons do.
+- Colour carries meaning only: orange for adding pods and the busy case,
+  blue for interaction, selection, and observed/expected data, traffic-light
+  colours for status. Neutral decisions and headlines use the text colour.
+
+### Fixed
+
+- Model comparison rows can be selected from the keyboard (Enter or Space)
+  and keep focus across the 3-second refresh; every focusable element has a
+  visible focus outline.
+- Replay buttons are no longer inside their headings.
+- While the first long-memory training runs, the learning panel says it is
+  training instead of "a day is needed" beside weeks of history.
+- The status square aligns with the headline when the detail wraps; values
+  in the facts grid line up when a label wraps; mobile chart time labels no
+  longer overlap.
+
 ## [0.16.0]
 
 ### Added

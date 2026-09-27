@@ -13,7 +13,8 @@ const DEMAND_SIGNALS = {
 };
 
 const HOLD_REASONS = {
-  diagnosis: (rec) => `Adding pods would not help. ${rec.explanation}`,
+  // The status line above already gives the diagnosis itself.
+  diagnosis: () => "Adding pods would not fix the problem above, so the pod count is held.",
   capacity_unknown: () =>
     "How much one pod can handle is not known yet, so no pod count is guessed. " +
     "Set SCALESCOPE_CAPACITY_PER_POD_RPS, give the Deployment a CPU request, " +
@@ -173,7 +174,9 @@ function freshness(ageS, tickSeconds) {
   return "bad";
 }
 
-function overallStatus(source, rec, latest, horizonText) {
+// The status line answers "does anything need attention?". Its detail only
+// carries what the recommendation below does not already say.
+function overallStatus(source, rec, latest) {
   if (source.mode === "observe" && !source.connected) {
     return {
       cls: "bad",
@@ -202,20 +205,13 @@ function overallStatus(source, rec, latest, horizonText) {
   }
   const change = rec.recommended_replicas - rec.current_replicas;
   if (rec.hold_reason) {
-    return {
-      cls: "warn",
-      headline: "No recommendation yet",
-      detail: HOLD_REASONS[rec.hold_reason](rec),
-    };
+    return { cls: "warn", headline: "No recommendation yet", detail: "" };
   }
   if (change !== 0) {
     return {
       cls: "warn",
       headline: change > 0 ? "More pods needed soon" : "Pods can be released",
-      detail:
-        change > 0
-          ? "Forecast demand will outgrow the current pods within the time new pods take to start."
-          : "Forecast demand stays below what fewer pods can handle.",
+      detail: "",
     };
   }
   if (rec.diagnosis !== "healthy") {
@@ -229,19 +225,14 @@ function overallStatus(source, rec, latest, horizonText) {
     };
   }
   const later = firstStepNeedingMore(rec, rec.current_replicas) >= 0;
-  return {
-    cls: "good",
-    headline: later ? "All good for now" : "All good",
-    detail: later
-      ? "More pods will be needed later in the forecast; none are needed yet."
-      : `${pods(rec.current_replicas)} cover the busy-case forecast for the next ${horizonText}.`,
-  };
+  return { cls: "good", headline: later ? "All good for now" : "All good", detail: "" };
 }
 
 function renderStatus(status) {
   document.getElementById("status").className = `status ${status.cls}`;
   setText("status-headline", status.headline);
   setText("status-detail", status.detail);
+  document.getElementById("status-detail").hidden = !status.detail;
 }
 
 // First forecast step at which more pods than `current` are needed, or -1.
@@ -338,7 +329,7 @@ function baseChartOptions(yTitle, integerTicks) {
       x: {
         ticks: {
           color: themeColor("--muted"),
-          maxTicksLimit: window.innerWidth < 640 ? 4 : 10,
+          maxTicksLimit: window.innerWidth < 640 ? 3 : 10,
           maxRotation: 0,
           autoSkipPadding: 12,
         },
@@ -412,7 +403,7 @@ function renderCharts(observations, forecast, rec, source) {
 
   const blue = themeColor("--blue");
   const orange = themeColor("--orange");
-  const band = "rgba(106, 174, 224, 0.22)";
+  const band = themeColor("--band");
   demandChart = upsertChart(
     demandChart,
     "demand-chart",
@@ -457,9 +448,13 @@ function formatDays(days) {
 
 function learningStage(learning) {
   const days = learning.history_days;
+  if (!learning.knows_daily_pattern && days >= 1) {
+    // Enough history; the first training run has not finished yet.
+    return { headline: `Training on ${formatDays(days)} of history.`, progress: null };
+  }
   if (!learning.knows_daily_pattern) {
     return {
-      headline: `Learning this workload's daily pattern: ${formatDays(days)} of history so far, a day is needed.`,
+      headline: `Learning the daily pattern: ${formatDays(days)} of history so far; forecasts start after a day.`,
       progress: Math.min(1, days),
     };
   }
@@ -506,8 +501,8 @@ function renderLearning(learning, source) {
   setText(
     "learning-note",
     learning.trained_at
-      ? `trained ${formatDuration(ageSeconds(learning.trained_at))} ago, retrains every ${formatDuration(learning.retrain_minutes * 60)}`
-      : `retrains every ${formatDuration(learning.retrain_minutes * 60)}`
+      ? `Trained ${formatDuration(ageSeconds(learning.trained_at))} ago; retrains every ${formatDuration(learning.retrain_minutes * 60)}`
+      : `Retrains every ${formatDuration(learning.retrain_minutes * 60)}`
   );
   setText("learning-accuracy", learningAccuracy(learning));
   setText(
@@ -539,17 +534,17 @@ function renderDayChart(learning) {
   if (forecast) {
     datasets.push(
       line("likely range", future(forecast.p90), "transparent", {
-        backgroundColor: "rgba(106, 174, 224, 0.22)",
+        backgroundColor: themeColor("--band"),
         fill: "+1",
         borderWidth: 0,
       }),
       line("_low", future(forecast.p10), "transparent", { borderWidth: 0 }),
       line("expected", future(forecast.p50), blue, { borderDash: [5, 4] }),
-      line("busy case", future(forecast.p90), orange)
+      line("busy case (pods sized for this)", future(forecast.p90), orange)
     );
   }
   const options = baseChartOptions(signal.unit, false);
-  options.scales.x.ticks.maxTicksLimit = window.innerWidth < 640 ? 4 : 12;
+  options.scales.x.ticks.maxTicksLimit = window.innerWidth < 640 ? 3 : 12;
   dayChart = upsertChart(dayChart, "day-chart", labels, datasets, options);
 }
 
@@ -622,8 +617,11 @@ function renderForecastRamp(forecast, latest, source) {
 }
 
 function renderModelTable(models) {
+  // Rows are rebuilt every refresh; keep keyboard focus on the same model.
+  const focusedModel = document.activeElement?.dataset?.model;
   const rows = models.map((m) => {
     const row = document.createElement("tr");
+    row.dataset.model = m.model;
     if (m.model === selectedModel) row.className = "selected";
     const name = appendCell(row, m.model);
     name.title = MODEL_DESCRIPTIONS[m.model] || "";
@@ -634,19 +632,28 @@ function renderModelTable(models) {
     bar.className = "bar";
     const fill = document.createElement("span");
     fill.className = "bar-fill";
-    fill.style.display = "block";
     fill.style.width = `${Math.round(m.confidence * 100)}%`;
     bar.appendChild(fill);
     confidence.append(bar, `${Math.round(m.confidence * 100)}%`);
     appendCell(row, formatNumber(m.peak_forecast_p90), "num");
     appendCell(row, formatPercent(m.projected_utilization), "num");
-    row.addEventListener("click", () => {
+    const select = () => {
       selectedModel = m.model;
       refresh();
+    };
+    row.tabIndex = 0;
+    row.setAttribute("aria-selected", String(m.model === selectedModel));
+    row.addEventListener("click", select);
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        select();
+      }
     });
     return row;
   });
   document.getElementById("model-table-body").replaceChildren(...rows);
+  if (focusedModel) rows.find((row) => row.dataset.model === focusedModel)?.focus();
 }
 
 function renderLog(observations) {
@@ -676,15 +683,17 @@ function renderSource(source) {
   sourceMode = source.mode;
   actuationModel = source.actuation_model;
   updateTriggerButtons();
-  setText("version-text", `ScaleScope v${source.version}`);
-  setText("mode-badge", source.mode === "observe" ? "OBSERVE" : "DEMO");
+  setText("version-text", `v${source.version}`);
+  setText("mode-text", source.mode === "observe" ? "Observe" : "Demo");
+  // DEMO data is simulated in-process and cannot disconnect.
+  document.getElementById("data-item").hidden = source.mode !== "observe";
 
   const connDot = document.getElementById("source-conn-dot");
   const errorBox = document.getElementById("source-error");
   if (source.connected) {
     const age = source.last_success_ts ? ageSeconds(source.last_success_ts) : 0;
     connDot.className = `dot ${freshness(age, tickSecondsOf(source))}`;
-    setText("source-conn-text", source.mode === "observe" ? "connected" : "simulated");
+    setText("source-conn-text", "connected");
     errorBox.hidden = true;
   } else {
     connDot.className = "dot bad";
@@ -704,11 +713,11 @@ function renderSource(source) {
       dot.className = "dot good";
       setText(
         "actuation-text",
-        `set ${pods(source.last_actuation_replicas)} ${formatDuration(ageSeconds(source.last_actuation_ts))} ago`
+        `Set ${pods(source.last_actuation_replicas)} ${formatDuration(ageSeconds(source.last_actuation_ts))} ago`
       );
     } else {
       dot.className = "dot";
-      setText("actuation-text", "on, no change needed yet");
+      setText("actuation-text", "On; no change needed yet");
     }
   }
 }
@@ -738,7 +747,7 @@ async function refresh() {
     const latest = observations[observations.length - 1];
     const horizonText = formatDuration(forecast.p50.length * tickSecondsOf(source));
 
-    renderStatus(overallStatus(source, rec, latest, horizonText));
+    renderStatus(overallStatus(source, rec, latest));
     renderDecision(rec, forecast, latest, source, horizonText);
     renderCharts(observations, forecast, rec, source);
     renderMetrics(latest);
@@ -776,8 +785,7 @@ function wireTriggerButtons() {
       const remaining = Math.ceil((endsAt - Date.now()) / 1000);
       if (remaining <= 0) {
         clearInterval(countdownTimer);
-        status.textContent = "no trigger active";
-        status.classList.remove("active");
+        status.textContent = "";
         return;
       }
       status.textContent = `${TRIGGER_LABELS[kind] || kind} running, ${remaining}s left`;
@@ -790,8 +798,7 @@ function wireTriggerButtons() {
       if (!currentWorkload) return;
       const kind = btn.dataset.kind;
       setTriggerButtonsBusy(true);
-      status.classList.add("active");
-      status.textContent = `starting ${TRIGGER_LABELS[kind] || kind}...`;
+      status.textContent = `Starting ${TRIGGER_LABELS[kind] || kind}…`;
       try {
         const durationSeconds = Number.parseInt(triggerDurationSelect.value, 10);
         await postJson(
@@ -799,7 +806,7 @@ function wireTriggerButtons() {
         );
         startCountdown(kind, Date.now() + durationSeconds * 1000);
       } catch (err) {
-        status.textContent = `trigger failed: ${err.message}`;
+        status.textContent = `Trigger failed: ${err.message}`;
       } finally {
         setTriggerButtonsBusy(false);
       }
@@ -816,7 +823,7 @@ function wireReplayButton() {
     if (!currentWorkload) return;
     const workload = currentWorkload;
     btn.disabled = true;
-    status.textContent = "re-forecasting past points with every model...";
+    status.textContent = "Re-forecasting past points with every model…";
     try {
       const result = await fetchJson(`/api/workloads/${encodeURIComponent(workload)}/replay`);
       if (workload !== currentWorkload) return;
@@ -835,7 +842,7 @@ function wireReplayButton() {
       status.textContent = `${result.n_observations} observations, ${result.scores.length} models scored`;
     } catch (err) {
       if (workload !== currentWorkload) return;
-      status.textContent = `replay failed: ${err.message}`;
+      status.textContent = `Replay failed: ${err.message}`;
     } finally {
       btn.disabled = false;
     }
@@ -849,7 +856,7 @@ function wireScalingReplayButton() {
     if (!currentWorkload) return;
     const workload = currentWorkload;
     btn.disabled = true;
-    status.textContent = "replaying recorded demand through both policies...";
+    status.textContent = "Replaying recorded demand through both policies…";
     try {
       const result = await fetchJson(
         `/api/workloads/${encodeURIComponent(workload)}/scaling-replay`
@@ -869,7 +876,7 @@ function wireScalingReplayButton() {
         : `Cannot replay yet: ${result.reason}.`;
     } catch (err) {
       if (workload !== currentWorkload) return;
-      status.textContent = `scaling replay failed: ${err.message}`;
+      status.textContent = `Scaling replay failed: ${err.message}`;
     } finally {
       btn.disabled = false;
     }
@@ -881,8 +888,8 @@ function clearReplayResults() {
   for (const id of ["replay-table-body", "scaling-replay-body"]) {
     document.getElementById(id).replaceChildren();
   }
-  setText("replay-status", "-");
-  setText("scaling-replay-status", "-");
+  setText("replay-status", "Not run yet.");
+  setText("scaling-replay-status", "Not run yet.");
 }
 
 // ---------- startup ----------
@@ -902,7 +909,7 @@ async function loadWorkloads() {
   updateWorkloadLabels(source);
   if (workloads.length === 0) {
     fetchError.hidden = false;
-    fetchError.textContent = "Waiting for the first observations...";
+    fetchError.textContent = "Waiting for the first observations…";
     setTimeout(loadWorkloads, POLL_INTERVAL_MS);
     return;
   }

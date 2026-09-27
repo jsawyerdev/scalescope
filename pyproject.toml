@@ -1,6 +1,6 @@
 [project]
 name = "scalescope"
-version = "0.16.0"
+version = "0.16.1"
 description = "Explainable predictive autoscaling for Kubernetes: forecasts demand, sizes pods from each workload's latency curve, and says when scaling will not help"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"

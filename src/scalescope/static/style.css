@@ -12,6 +12,9 @@
 }
 
 :root {
+  /* Neutrals carry the page; blue marks interaction, selection, and the
+     observed/expected data series; orange means more demand or more pods;
+     green/amber/red are the status traffic light and nothing else. */
   --bg: #f3f7fb;
   --surface: #ffffff;
   --surface-alt: #f7fafd;
@@ -20,17 +23,26 @@
   --text: #1c3553;
   --muted: #5d7a97;
   --blue: #1f6fb2;
-  --blue-mid: #6aaee0;
   --blue-light: #dcebf8;
+  --band: rgba(106, 174, 224, 0.22); /* forecast likely range in charts */
   --orange: #ef8a1f;
-  --orange-light: #fde9d4;
   --green: #2f9e5f;
-  --green-light: #e3f4ea;
   --amber: #e5a100;
   --amber-light: #fff4d6;
   --red: #d64545;
   --red-light: #fbe5e5;
-  --font: "DejaVu Sans Mono", "SFMono-Regular", "Consolas", "Menlo", monospace;
+
+  /* The platform's own sans for reading; the bundled mono only where
+     digits and identifiers must line up (values, tables, versions). */
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-data: "DejaVu Sans Mono", ui-monospace, "SFMono-Regular", Consolas, Menlo, monospace;
+  --text-sm: 12px;
+  --text-data: 13px; /* mono in tables runs wider than the UI font */
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 18px;
+  --text-2xl: 24px;
+  --control-height: 32px;
 }
 
 * { box-sizing: border-box; }
@@ -39,23 +51,23 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: var(--font);
-  font-size: 13px;
+  font-family: var(--font-ui);
+  font-size: var(--text-md);
   line-height: 1.45;
 }
 
-h2, h3 { margin: 0; font-size: 13px; font-weight: 400; text-transform: uppercase; letter-spacing: 0.06em; }
+h2 { margin: 0; font-size: var(--text-lg); font-weight: 600; }
+h3 { margin: 0; font-size: var(--text-md); font-weight: 600; }
 p { margin: 0; }
 
 .label {
   display: block;
   color: var(--muted);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  font-size: var(--text-sm);
 }
+.value, .data { font-family: var(--font-data); }
 
-.note { color: var(--muted); font-size: 12px; text-transform: none; letter-spacing: 0; }
+.note { color: var(--muted); font-size: var(--text-sm); font-weight: 400; }
 .hint { cursor: help; text-decoration: underline dotted var(--line-strong); text-underline-offset: 3px; }
 .inline { display: inline-flex; align-items: center; gap: 6px; }
 
@@ -65,11 +77,15 @@ select, .button {
   background: var(--surface);
   border: 1px solid var(--line-strong);
   border-radius: 0;
-  padding: 5px 10px;
+  height: var(--control-height);
+  padding: 0 10px;
 }
 .button { cursor: pointer; }
 .button:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); }
 .button:disabled { color: var(--muted); background: var(--surface-alt); cursor: not-allowed; }
+
+/* One visible focus treatment for everything that takes keyboard focus. */
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 
 /* ---------- Top bar ---------- */
 
@@ -82,20 +98,13 @@ select, .button {
   background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
-.brand { font-size: 17px; color: var(--blue); letter-spacing: 0.04em; align-self: center; }
+.brand { font-size: var(--text-xl); font-weight: 600; color: var(--blue); align-self: center; }
 .topbar-field { display: flex; flex-direction: column; gap: 3px; }
-.version { margin-left: auto; color: var(--muted); font-size: 11px; align-self: center; }
+/* Text values take a control's height so every label sits on one line. */
+.topbar-field > :last-child { min-height: var(--control-height); display: flex; align-items: center; }
+.version { margin-left: auto; color: var(--muted); font-size: var(--text-sm); align-self: center; }
 
-.tag {
-  display: inline-block;
-  padding: 2px 8px;
-  border: 1px solid var(--blue);
-  color: var(--blue);
-  background: var(--blue-light);
-  font-size: 12px;
-}
-
-.dot { display: inline-block; width: 9px; height: 9px; background: var(--line-strong); }
+.dot { flex: none; display: inline-block; width: 9px; height: 9px; background: var(--line-strong); }
 .dot.good { background: var(--green); }
 .dot.warn { background: var(--amber); }
 .dot.bad { background: var(--red); }
@@ -133,87 +142,91 @@ select, .button {
   background: var(--amber-light);
 }
 
-/* Traffic light: one glance says whether anything needs attention. */
+/* Traffic light: one glance says whether anything needs attention. The
+   square carries the state; the background is tinted only when something
+   does need attention. */
 .status {
   display: flex;
-  align-items: center;
-  gap: 16px;
+  align-items: flex-start;
+  gap: 14px;
   padding: 14px 18px;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-left: 6px solid var(--line-strong);
 }
-.status.good { border-left-color: var(--green); background: var(--green-light); }
-.status.warn { border-left-color: var(--amber); background: var(--amber-light); }
-.status.bad { border-left-color: var(--red); background: var(--red-light); }
-.light { flex: none; width: 18px; height: 18px; background: var(--line-strong); }
+.status.warn { border-color: var(--amber); background: var(--amber-light); }
+.status.bad { border-color: var(--red); background: var(--red-light); }
+/* Centred on the headline's first line: (16px x 1.45 line height - 14px) / 2. */
+.light { flex: none; width: 14px; height: 14px; margin-top: 5px; background: var(--line-strong); }
 .status.good .light { background: var(--green); }
 .status.warn .light { background: var(--amber); }
 .status.bad .light { background: var(--red); }
-.status-headline { font-size: 15px; }
+.status-headline { font-size: var(--text-lg); font-weight: 600; }
 .status-detail { color: var(--muted); }
 
-.decision-action { font-size: 26px; color: var(--blue); margin: 4px 0 6px; }
+/* Colour only where it means something: orange = pods are being added,
+   muted = no decision; everything else reads as plain text. */
+.decision-action { font-size: var(--text-2xl); font-weight: 600; margin: 2px 0 6px; }
 .decision-action.up { color: var(--orange); }
 .decision-action.hold { color: var(--muted); }
 .decision-reason { max-width: 80ch; }
 
 .facts, .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  border-top: 1px solid var(--line);
-  border-left: 1px solid var(--line);
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px 24px;
   margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
 }
-.fact, .cell {
-  padding: 10px 12px;
-  border-right: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-}
-.fact .value { font-size: 17px; }
+/* Values share a line across each row even when a label wraps. */
+.fact, .cell { display: flex; flex-direction: column; justify-content: space-between; gap: 2px; }
+.fact .value { font-size: var(--text-xl); }
 .cell .value { overflow-wrap: anywhere; }
-.stats { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
-.footnote { margin-top: 10px; color: var(--muted); font-size: 12px; }
+.stats { grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); }
+.footnote { margin-top: 10px; color: var(--muted); font-size: var(--text-sm); }
 
 .chart-wrap { position: relative; height: 280px; }
-.learning-headline { font-size: 17px; color: var(--blue); margin: 2px 0 6px; }
+.chart-wrap.small { height: 150px; }
+.learning-headline { font-size: var(--text-lg); margin: 2px 0 6px; }
 .progress { height: 6px; background: var(--blue-light); margin: 4px 0 10px; max-width: 420px; }
 .progress span { display: block; height: 100%; background: var(--blue); }
-.chart-wrap.small { height: 150px; }
 
 .try-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
 .try-row .label { display: inline; }
-#trigger-status.active { color: var(--orange); }
+#trigger-status { color: var(--orange); }
 
 /* ---------- Engineering details ---------- */
 
-.details summary { cursor: pointer; text-transform: uppercase; letter-spacing: 0.06em; color: var(--blue); }
+.details summary { cursor: pointer; font-weight: 600; color: var(--blue); }
 .details[open] summary { margin-bottom: 6px; }
-.details h3 { margin: 22px 0 8px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; }
-.details > .note { margin-bottom: 8px; }
+.details .section-header { margin: 22px 0 8px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; }
 .details .grid { margin-top: 0; }
+.details > .note { margin-bottom: 8px; }
+.details .table-wrap + .note { margin-top: 6px; }
 
 .table-wrap { overflow-x: auto; }
 .log-wrap { max-height: 320px; overflow-y: auto; }
 table { width: 100%; border-collapse: collapse; }
 th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
-th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 400; }
+th { color: var(--muted); font-size: var(--text-sm); font-weight: 400; }
+td { font-family: var(--font-data); font-size: var(--text-data); }
 td.num, th.num { text-align: right; }
 tbody tr.selected { background: var(--blue-light); }
 #model-table-body tr { cursor: pointer; }
 #model-table-body tr:hover { background: var(--surface-alt); }
+#model-table-body tr:focus-visible { outline-offset: -2px; }
 
 .delta.positive { color: var(--orange); }
 .delta.negative { color: var(--blue); }
 .delta.zero { color: var(--muted); }
 
 .bar { display: inline-block; width: 70px; height: 6px; background: var(--blue-light); vertical-align: middle; margin-right: 8px; }
-.bar-fill { height: 100%; background: var(--blue); }
+.bar-fill { display: block; height: 100%; background: var(--blue); }
 
 @media (max-width: 640px) {
   .topbar { padding: 10px 16px; gap: 10px 18px; }
   .version { margin-left: 0; }
   .page { padding: 14px 16px 32px; }
-  .decision-action { font-size: 21px; }
+  .decision-action { font-size: 20px; }
   .chart-wrap { height: 230px; }
 }
