@@ -23,7 +23,7 @@ jobs:
           pip install -r requirements-lock.txt
           pip install --no-deps -e .
       - name: Format
-        run: black --check src tests sample-workload/app scripts/tune
+        run: black --check src tests sample-workload/app scripts
       - name: Lint
         run: ruff check .
       - name: Type check

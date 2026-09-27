@@ -1,7 +1,7 @@
 [project]
 name = "scalescope"
-version = "0.14.1"
-description = "Explainable predictive Kubernetes capacity intelligence lab"
+version = "0.15.0"
+description = "Explainable predictive autoscaling for Kubernetes: forecasts demand, sizes pods from each workload's latency curve, and says when scaling will not help"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
 license = "Apache-2.0"
@@ -9,13 +9,25 @@ license-files = ["LICENSE", "NOTICE"]
 authors = [
     { name = "James Sawyer", email = "james@jamessawyer.co.uk" },
 ]
-keywords = ["kubernetes", "autoscaling", "forecasting", "capacity-planning"]
+keywords = [
+    "kubernetes",
+    "autoscaling",
+    "forecasting",
+    "capacity-planning",
+    "queueing",
+    "hpa",
+]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
     "Framework :: FastAPI",
     "Intended Audience :: System Administrators",
     "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.14",
     "Topic :: System :: Monitoring",
+    "Topic :: System :: Systems Administration",
 ]
 dependencies = [
     "fastapi>=0.115",
@@ -44,6 +56,13 @@ dev = [
     "prometheus-client>=0.21",
 ]
 
+[project.urls]
+Homepage = "https://github.com/jsawyerdev/scalescope"
+Documentation = "https://github.com/jsawyerdev/scalescope/blob/main/examples/README.md"
+Source = "https://github.com/jsawyerdev/scalescope"
+Issues = "https://github.com/jsawyerdev/scalescope/issues"
+Changelog = "https://github.com/jsawyerdev/scalescope/blob/main/CHANGELOG.md"
+
 [tool.ruff]
 line-length = 88
 target-version = "py314"
@@ -57,7 +76,13 @@ testpaths = ["tests"]
 
 [tool.mypy]
 python_version = "3.14"
-files = ["src/scalescope", "tests", "sample-workload/app", "scripts/tune"]
+files = [
+    "src/scalescope",
+    "tests",
+    "sample-workload/app",
+    "scripts/tune",
+    "scripts/release_notes.py",
+]
 warn_return_any = true
 warn_unused_ignores = true
 warn_unused_configs = true

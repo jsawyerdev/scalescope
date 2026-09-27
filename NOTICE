@@ -1,7 +1,8 @@
 ScaleScope
 Copyright 2026 James Sawyer
 
-This product includes DejaVu Sans Mono Regular. Its license is distributed
-with the source and package at:
+This product includes third-party components under their own licenses,
+distributed with the source and package:
 
-src/scalescope/static/fonts/DejaVu-LICENSE.txt
+- DejaVu Sans Mono Regular: src/scalescope/static/fonts/DejaVu-LICENSE.txt
+- Chart.js 4.5.1 (MIT): src/scalescope/static/vendor/Chart.js-LICENSE.md

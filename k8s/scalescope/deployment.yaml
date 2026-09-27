@@ -26,7 +26,7 @@ spec:
       containers:
         - name: scalescope
           # Published by .github/workflows/image.yml (amd64 and arm64).
-          image: ghcr.io/jsawyerdev/scalescope:0.14.1
+          image: ghcr.io/jsawyerdev/scalescope:0.15.0
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

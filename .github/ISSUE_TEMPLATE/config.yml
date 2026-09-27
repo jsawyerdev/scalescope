@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/jsawyerdev/scalescope/security/advisories/new
+    about: Please report vulnerabilities privately, not as a public issue. See SECURITY.md.
+  - name: Deployment guide
+    url: https://github.com/jsawyerdev/scalescope/blob/main/examples/README.md
+    about: Install, configuration, and troubleshooting steps.

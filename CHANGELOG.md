@@ -4,6 +4,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.15.0]
+
+### Added
+
+- Open-source project files: `CONTRIBUTING.md` (setup, checks, layout,
+  release process), `SECURITY.md` (private vulnerability reporting and the
+  trust boundaries), `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), issue
+  and pull request templates, and `CODEOWNERS`.
+- Automated releases: merging a version bump to `main` tags `v<version>`,
+  creates the GitHub Release from that version's section of this file
+  (`scripts/release_notes.py`), and publishes the `<version>` and `latest`
+  images. `tests/test_release.py` fails if the version in `pyproject.toml`,
+  this file, the Kubernetes manifests, and the install commands disagree.
+- Images carry SBOM and provenance attestations.
+- CodeQL scanning (Python, JavaScript, workflows) and weekly Dependabot
+  updates for Python, Docker, and GitHub Actions.
+- Package metadata: project URLs, classifiers, keywords.
+
+### Changed
+
+- NOTICE lists the vendored Chart.js alongside DejaVu Sans Mono.
+- Local development uses `SCALESCOPE_DB_PATH=./scalescope.duckdb` and the
+  lock file, matching CI.
+
+### Note
+
+0.14.0 and 0.14.1 were merged but never tagged, so no images were published
+for them; 0.15.0 is the first release that includes their changes.
+
 ## [0.14.1]
 
 ### Fixed
