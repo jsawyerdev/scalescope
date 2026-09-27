@@ -27,6 +27,9 @@ counts. It changes a Deployment only when you turn on actuation (step 5).
 - **CPU requests** on the Deployments you want recommendations for. Without
   a request rate from Prometheus or the workload itself, ScaleScope sizes
   pods against their CPU request.
+- Optional: a node autoscaler (cluster autoscaler or Karpenter). ScaleScope
+  changes pod counts only; nodes are removed, and money saved, only if
+  something scales the nodes. See "Pods, nodes, and cost" in the main README.
 - The images are public, multi-arch (amd64/arm64), and need no pull secret:
   `ghcr.io/jsawyerdev/scalescope` and `ghcr.io/jsawyerdev/scalescope-sample-workload`.
 
@@ -102,7 +105,7 @@ kubectl -n scalescope-system set env deployment/scalescope \
 | `SCALESCOPE_PROMETHEUS_URL` | Read per-pod request rate (used as demand, sharper than CPU), p95 latency (used to size pods), CPU throttling, and error rate. Each query must return series labelled `namespace` and `pod`. The defaults assume `http_requests_total` with a `code` label and an `http_request_duration_seconds` histogram, plus cAdvisor for throttling; change `SCALESCOPE_PROMETHEUS_RPS_QUERY`, `_LATENCY_QUERY`, `_ERROR_RATE_QUERY`, or `_THROTTLING_QUERY` to match your metric names, or set one empty to skip it. |
 | `SCALESCOPE_LATENCY_SLO_MS` | The p95 latency (ms) pods are sized to keep. Unset, twice the workload's own no-load latency. |
 | `SCALESCOPE_CAPACITY_PER_POD_RPS` | Requests/s one pod serves at 100% of its CPU request, from a load test. Overrides the measured capacity. |
-| `SCALESCOPE_POD_STARTUP_SECONDS` | How long a new pod takes to serve traffic (default 30), including a new node if the cluster autoscaler must add one. Set it to what you actually see: ScaleScope starts pods this far ahead of the forecast need, which is where it beats a reactive autoscaler. |
+| `SCALESCOPE_POD_STARTUP_SECONDS` | How long a new pod takes to serve traffic (default 30), including a new node if the cluster autoscaler must add one (typically 1 to 3 minutes more). Set it to what you actually see: ScaleScope starts pods this far ahead of the forecast need, which is where it beats a reactive autoscaler. |
 | `SCALESCOPE_MIN_REPLICAS`, `SCALESCOPE_MAX_REPLICAS` | Bounds on every recommendation (default 1 and 30). |
 | `SCALESCOPE_TARGET_UTILIZATION` | How full each pod may run (default 0.70). |
 | `SCALESCOPE_K8S_NAMESPACES` | Comma-separated namespaces to observe; `*` (the default in the manifest) means all readable ones. |

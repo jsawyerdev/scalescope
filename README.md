@@ -81,6 +81,24 @@ Two runtime modes:
 | Memory, restarts, pending pods | metrics-server, Kubernetes API | diagnosis only |
 | Disk I/O, network I/O, node pressure | **not collected** | — |
 
+**What the models learn from.** Both forecasters, short-term and
+long-memory, learn from exactly one series per workload: its request rate
+when anything reports one, otherwise its total CPU. So traffic *is* the
+model's input whenever it is available. Nothing is blended into a combined
+score. The other signals have other jobs:
+
+| Signal | Fed to the forecast models? | What it does instead |
+|---|---|---|
+| Request rate (traffic) | **Yes**, preferred | Also, with p95 latency, fits the latency curve that says how much one pod can take |
+| Total CPU | **Yes**, when there is no request rate | Also the capacity fallback |
+| Memory | **No** | Diagnosis only: a probable memory leak holds the pod count instead of adding pods |
+| p95 latency | No | Pod capacity (the latency curve); diagnosis |
+| Per-pod CPU %, throttling, error rate, restarts, pending pods | No | Diagnosis; throttling and pending pods hold the pod count, because more pods would not fix them |
+
+Memory is not a demand signal: most services' memory tracks caches, heaps,
+and connection pools rather than requests per second, so it does not say
+how many pods the load needs, and a leak would read as rising demand.
+
 The forecast takes exactly one series per workload, and it must be *demand*:
 something adding replicas does not change. Per-pod CPU %, latency, and error
 rate all fall when pods are added, so a model trained on them learns the
@@ -155,8 +173,21 @@ week of history on the new time accumulates.
 
 ## Deploy to any cluster
 
-Requirements: metrics-server (most managed clusters ship it), and CPU
-requests on the Deployments you want recommendations for.
+ScaleScope is one Deployment (one replica) with its own volume: history is
+kept in an embedded DuckDB database, so there is no external database,
+queue, or cloud service. What it depends on:
+
+| Dependency | Required? | Without it |
+|---|---|---|
+| Kubernetes API | Yes | Nothing to observe |
+| [metrics-server](https://github.com/kubernetes-sigs/metrics-server) | Yes, in practice (most managed clusters ship it) | No CPU or memory figures, so no forecast from CPU |
+| CPU requests on your Deployments | For CPU-based sizing | Pod capacity is unknown, and the recommendation holds the current pod count |
+| Prometheus | Optional | Request rate, latency, and errors come only from one workload's own `/metrics` (`SCALESCOPE_K8S_METRICS_URL`); throttling reads `0.0` |
+| A node autoscaler | Optional | Pods still scale, but node cost does not change (see "Pods, nodes, and cost") |
+| `ghcr.io` | To pull the image | Mirror the image to your own registry |
+
+ScaleScope does not run a Prometheus server of its own. It reads one you
+already have, one instant query per signal per tick.
 
 ```
 kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.16.1"
@@ -273,6 +304,26 @@ Actuation requires all of the following:
 The dashboard and `GET /api/source` show which cluster identity is connected,
 which namespace scope is visible, and whether actuation is enabled.
 See [examples/README.md](examples/README.md) for copy-paste deployment paths.
+
+## Pods, nodes, and cost
+
+ScaleScope changes **pod counts only**. It does not add or remove nodes, and
+its permissions do not let it read them. Nodes are what you pay for, so the
+cost saving depends on something that manages nodes: the Kubernetes
+[cluster autoscaler](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler),
+[Karpenter](https://karpenter.sh/), or your provider's managed equivalent.
+
+| Your cluster | What ScaleScope saves |
+|---|---|
+| Node autoscaler running | Pods the forecast does not need are released; the node autoscaler then removes the nodes left empty. On scale-up, pods are requested a pod-startup time early, which gives the node autoscaler the same head start. |
+| Fixed node count | No cost saving: fewer pods only leave nodes less full. You still get earlier scale-ups and the diagnosis. |
+
+On scale-up the node head start is indirect: a node autoscaler only adds a
+node once pods are waiting for room. Set `SCALESCOPE_POD_STARTUP_SECONDS` to
+include node start-up (typically 1 to 3 minutes) so pods are requested early
+enough for that. Pods stuck pending show on the dashboard as a node-capacity
+problem, and ScaleScope then holds the pod count rather than adding pods
+that cannot be scheduled.
 
 ## Architecture
 
@@ -1047,5 +1098,12 @@ The bundled DejaVu Sans Mono Regular font keeps its own license in
   every `SCALESCOPE_RETRAIN_MINUTES`, on one thread. At 100 workloads with
   four weeks of history that is about 40% of one core; raise the retrain
   interval for larger clusters.
+- **One replica.** ScaleScope runs as a single pod with its history on
+  one volume. While it restarts, recommendations and actuation pause; the
+  Deployments keep their current pod counts and no history is lost.
+  Running two replicas is not supported: both would collect, and with
+  actuation on, both would write.
+- **Nodes are not scaled.** ScaleScope changes pod counts; the cost saving
+  needs a node autoscaler (see "Pods, nodes, and cost").
 - **Unannounced demand steps** are not forecastable; see "Scaling replay"
   for the pods-versus-shortfall tradeoff and the setting that controls it.
