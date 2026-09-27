@@ -4,6 +4,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [Unreleased]
+
+### Fixed
+
+- Docs caught up with 0.16.x: the README status no longer names an old
+  version; the dashboard-fetch diagram includes the learning panel's 60 s
+  poll; `/healthz` documents the history loop; the forecast-model section
+  says DEMO now follows a daily and weekly shape (the measurements still use
+  the simulator's built-in cycle); the replay endpoint's ranking and the
+  "Autoscaling" top-bar item are described as they are; troubleshooting
+  quotes the dashboard's current messages.
+
 ## [0.16.1]
 
 ### Changed

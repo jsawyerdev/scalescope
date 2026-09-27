@@ -42,9 +42,11 @@ anything to learn; or clusters without metrics-server.
 6. **Proves it** on your own data: the dashboard shows the model's live
    accuracy, and a replay compares its decisions with a standard HPA's.
 
-## Status: v0.16.0 (learns each workload's daily and weekly pattern from weeks of history; forecasts an hour ahead and scales a pod-startup time early)
+## Status
 
-See [CHANGELOG.md](CHANGELOG.md) for what changed at each version.
+The latest version is on the
+[releases page](https://github.com/jsawyerdev/scalescope/releases), and
+[CHANGELOG.md](CHANGELOG.md) says what changed at each version.
 
 Created by James Sawyer. Open source under the [Apache License 2.0](LICENSE);
 contributions are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -277,7 +279,7 @@ See [examples/README.md](examples/README.md) for copy-paste deployment paths.
 ```mermaid
 flowchart TB
     subgraph DEMO["DEMO mode"]
-        SIM["simulator.py<br/>reactive-HPA-controlled synthetic workload,<br/>fault injection"]
+        SIM["simulator.py + demo_history.py<br/>reactive-HPA-controlled synthetic workload,<br/>daily/weekly demand, fault injection"]
     end
 
     subgraph CLUSTER["Real Kubernetes cluster (OBSERVE mode)"]
@@ -393,19 +395,22 @@ All six models implement the same `ForecastModel` protocol (`src/scalescope/mode
 of `p10`/`p50`/`p90` arrays. None of them ever sees CPU-per-pod or replica count — see "What the
 forecast uses" for why.
 
-The simulated series (`simulator.py`) is a ~300-tick sine-wave daily cycle (amplitude 400 around a
-base of 700) plus noise, with occasional faults. Only the `traffic_spike` fault adds directly to
-`request_rate` (a flat +600 for the fault's duration); `memory_leak`, `cpu_limit`, and
+The simulator's built-in series (`simulator.py`), which the measurements in this section and in
+"Scaling policy", "Scaling replay", and "Replay lab" use, is a ~300-tick sine-wave cycle (amplitude
+400 around a base of 700) plus noise, with occasional faults. DEMO mode instead drives the simulator
+with `demo_history.py`'s daily and weekly shape (busy weekday mornings and afternoons, quiet nights
+and weekends, a small ten-minute wave), the same shape its generated three weeks of history follow.
+Only the `traffic_spike` fault adds directly to `request_rate` (a flat +600 for the fault's duration); `memory_leak`, `cpu_limit`, and
 `node_capacity` faults change memory/CPU/node signals that `diagnosis.py` reads separately — they do
 not show up as demand spikes in the series the forecasters fit on.
 
 | Model | Fits on | Min history | Fallback | Reasonable fit | Poor fit |
 |---|---|---|---|---|---|
 | `naive` | last observed value | none | — | flat/near-term stretches | trending or seasonal periods |
-| `seasonal_naive` | the last full cycle of the period `detect_period` finds in the history (the ~300-tick daily cycle in DEMO) | two full cycles (and ≥ 100 ticks) | `naive` until a period is confidently detected | once the cycle is established | cold start, or when a fault in the previous cycle (e.g. a `traffic_spike`) gets replayed |
+| `seasonal_naive` | the last full cycle of the period `detect_period` finds in the history (the ~300-tick cycle of the simulator's built-in series) | two full cycles (and ≥ 100 ticks) | `naive` until a period is confidently detected | once the cycle is established | cold start, or when a fault in the previous cycle (e.g. a `traffic_spike`) gets replayed |
 | `ewma` | exponentially weighted average of the whole history (alpha 0.3), extrapolated flat | none | — | smoothing out noise on a roughly flat series | any series with real trend or seasonality, since it always flattens |
 | `linear_trend` | least-squares line over the last 60 points | 8 ticks | `naive` below threshold | short local trends (e.g. climbing into a spike) | the full sine cycle, since a straight line can't turn over |
-| `auto_ets` | Nixtla StatsForecast `AutoETS`, exponential-smoothing state space fit to the whole history, 80% prediction interval; seasonal only for a detected period of 24 ticks or less, because StatsForecast's ETS skips every seasonal model above 24 | 30 ticks | `naive`, on short history or if the fit raises | general-purpose statistical fit; best replay MAE on the DEMO series | long cycles (the DEMO's 300-tick cycle is fit without seasonality); MSTL decomposition was measured and rejected: better on clean cycles, worse than naive once faults occur |
+| `auto_ets` | Nixtla StatsForecast `AutoETS`, exponential-smoothing state space fit to the whole history, 80% prediction interval; seasonal only for a detected period of 24 ticks or less, because StatsForecast's ETS skips every seasonal model above 24 | 30 ticks | `naive`, on short history or if the fit raises | general-purpose statistical fit; best replay MAE on the built-in series | long cycles (the built-in 300-tick cycle is fit without seasonality); MSTL decomposition was measured and rejected: better on clean cycles, worse than naive once faults occur |
 | `lightgbm_quantile` | three independent LightGBM quantile regressors (p10/p50/p90) over lag (1,2,3,5,10, plus the detected period when there is one) and rolling mean/std(5) features via MLForecast | 60 ticks | `naive`, on short history or if fitting/predicting raises | has enough history and lag structure to pick up the daily cycle and recent spike dynamics | short or noisy history — 60 ticks is barely two lag windows, and quantile crossing (corrected by sorting p10/p50/p90 per step) signals the fit is unstable |
 
 Every baseline computes its p10/p90 band from the standard deviation of first differences in the
@@ -428,7 +433,7 @@ horizon by definition. The rule is deliberately asymmetric:
   for its busiest minute within the startup time, and keep pods it needs within twice that time
   (see "How it learns").
 
-Measured offline on 2,400-tick DEMO demand series with random faults (3 seeds, pods ready 15 ticks
+Measured offline on 2,400-tick series from the simulator's built-in cycle with random faults (3 seeds, pods ready 15 ticks
 after a scale-up, AutoETS forecasts), against the previous rule, which scaled both ways on the
 startup-lead peak:
 
@@ -562,7 +567,7 @@ more than an over-forecast, and coverage, the share of actual values at or
 below p90 (0.90 is calibrated; lower under-provisions, higher wastes pods).
 MAE/MAPE of the median stay alongside for comparison.
 
-On a 5,000-tick DEMO series the result is not flattering to the ML models:
+On a 5,000-tick series from the simulator's built-in cycle the result is not flattering to the ML models:
 
 | Model | p90 pinball loss | p90 coverage | p50 MAE |
 |---|---|---|---|
@@ -727,7 +732,9 @@ environments where ScaleScope is authorized to change replica counts.
 
 `static/app.js`'s `refresh()` runs every `POLL_INTERVAL_MS` (3s) and fetches
 only the selected model's forecast; the recommendations call already carries
-every model's replica decision. Replay and load triggers are explicit button
+every model's replica decision. The "What it has learned" panel refreshes
+every `LEARNING_POLL_INTERVAL_MS` (60s), since the minute history and model
+change at most once a minute. Replay and load triggers are explicit button
 actions, never polled. Chart.js is vendored under `static/vendor/`, so the
 dashboard needs no internet access:
 
@@ -740,6 +747,10 @@ sequenceDiagram
         Browser->>API: GET /observations, /recommendations, /source
         API-->>Browser: JSON
         Browser->>API: GET /forecast?model=selected
+        API-->>Browser: JSON
+    end
+    loop every 60s
+        Browser->>API: GET /learning
         API-->>Browser: JSON
     end
     Note over Browser,API: on button click only — not polled
@@ -844,7 +855,7 @@ ScaleScope be the sole controller.
 `last_actuation_ts`, `last_actuation_replicas`, and
 `last_actuation_error` (populated whether the failure was an HPA conflict
 or an API error, so "why didn't it scale" is never a silent question) -
-the dashboard sidebar shows this as an "actuation" row whenever
+the dashboard's top bar shows this as its "Autoscaling" item whenever
 `actuate=true` in observe mode.
 
 Exact sequence, once per tick, straight from `main.py`'s `_observe_loop` /
@@ -952,8 +963,9 @@ triggers require that variable to be set.
 
 - `GET /healthz` — unauthenticated liveness check, the only exempt route
   when Basic Auth is enabled (see "Authentication" above). Returns 503 once
-  the data-source loop has stopped (for example, the Kubernetes client could
-  not be created at startup), so the kubelet restarts the pod
+  the data-source loop or the history loop (minute rollups and retraining)
+  has stopped (for example, the Kubernetes client could not be created at
+  startup), so the kubelet restarts the pod
 - `GET /api/workloads`
 - `GET /api/workloads/{name}/observations?limit=300`
 - `GET /api/workloads/{name}/forecast?model={naive|seasonal_naive|ewma|linear_trend|auto_ets|lightgbm_quantile}`
@@ -961,7 +973,8 @@ triggers require that variable to be set.
 - `GET /api/workloads/{name}/recommendation?model=...`
 - `GET /api/workloads/{name}/recommendations` — all six models, side by side
 - `GET /api/workloads/{name}/replay` — backtests every model against this
-  workload's recorded history (MAE/MAPE, sorted best first) — what the
+  workload's recorded history (p90 pinball loss and coverage, p50 MAE/MAPE,
+  sorted best first by p90 loss) — what the
   dashboard's "Replay lab" panel calls on demand
 - `GET /api/workloads/{name}/learning` — what the long-memory model has
   learned (history, daily/weekly pattern, live accuracy against "same as
