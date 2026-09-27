@@ -1,6 +1,6 @@
 [project]
 name = "scalescope"
-version = "0.15.0"
+version = "0.15.1"
 description = "Explainable predictive autoscaling for Kubernetes: forecasts demand, sizes pods from each workload's latency curve, and says when scaling will not help"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
@@ -30,30 +30,32 @@ classifiers = [
     "Topic :: System :: Systems Administration",
 ]
 dependencies = [
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.32",
-    "duckdb>=1.1",
-    "polars>=1.14",
-    "numpy>=2.1",
-    "pandas>=2.2",
-    "lightgbm>=4.5",
-    "mlforecast>=0.13",
-    "statsforecast>=2.0",
-    "kubernetes>=31.0",
-    "httpx>=0.27",
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.54.0",
+    "duckdb>=1.5.5",
+    "polars>=1.44.2",
+    "numpy>=2.5.3",
+    # statsforecast 2.1 and mlforecast 1.1 declare pandas<3; 2.3.3 is the
+    # newest pandas they support.
+    "pandas>=2.3.3",
+    "lightgbm>=4.7.0",
+    "mlforecast>=1.1.0",
+    "statsforecast>=2.1.1",
+    "kubernetes>=36.0.3",
+    "httpx>=0.28.1",
     # Imported directly (auth middleware, Kubernetes transport errors), not
     # only through fastapi and kubernetes.
-    "starlette>=0.40",
-    "urllib3>=2.0",
+    "starlette>=1.7.0",
+    "urllib3>=2.8.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.3",
-    "ruff>=0.7",
-    "black>=24.10",
-    "mypy>=1.13",
-    "prometheus-client>=0.21",
+    "pytest>=9.1.1",
+    "ruff>=0.16.9",
+    "black>=26.5.1",
+    "mypy>=2.3.1",
+    "prometheus-client>=0.26.0",
 ]
 
 [project.urls]

@@ -4,6 +4,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.15.1]
+
+### Changed
+
+- Every dependency is on its newest stable release that the rest of the
+  stack supports, and `pyproject.toml` requires those versions, so a fresh
+  install or image build cannot resolve anything older: FastAPI 0.141.1,
+  Starlette 1.7.0, uvicorn 0.54.0, DuckDB 1.5.5, polars 1.44.2, NumPy
+  2.5.3, LightGBM 4.7.0, statsforecast 2.1.1, mlforecast 1.1.0,
+  Kubernetes client 36.0.3, urllib3 2.8.0; pytest 9.1.1, ruff 0.16.9,
+  black 26.5.1, mypy 2.3.1. `requirements-lock.txt` pins the full
+  resolution CI installs (statsmodels 0.15, SQLAlchemy 2.1, optuna 5 among
+  the transitive updates).
+- pandas stays on 2.3.3: statsforecast 2.1 and mlforecast 1.1 declare
+  `pandas<3`. The forecasts and replay scores were checked identical on
+  both pandas lines before choosing the newest forecasting libraries.
+- GitHub Actions on their latest majors (checkout v7, setup-python v7,
+  Docker login/setup v4, metadata v6, build-push v7), all on Node 24.
+- The sample workload requires FastAPI 0.141.1, uvicorn 0.54.0, and
+  prometheus-client 0.26.0.
+
 ## [0.15.0]
 
 ### Added
