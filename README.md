@@ -375,7 +375,25 @@ dashboard's Nodes panel shows nodes running, nodes the requests need, the
 busy case (p90) over the next hour, idle node-hours over the last day, and
 the measured node start-up time.
 
-**Measured.** {{NODE_EVAL}}
+**Measured.** Three workloads with different traffic, sizes, and HPA-style
+pod counts share a pool of 4-vCPU nodes with steady other pods. From points
+every 4 hours through a final week, each workload's model trained on the 21
+days before, forecasting the next hour (three independent histories, 126
+forecasts):
+
+| | Forecast | "Same as now" |
+|---|---|---|
+| Error in the pool's requested CPU | 3.2% | 5.3% |
+| Minutes at or below the p90 line | 90% | — |
+| Busiest-minute node count: right | 68% | 55% |
+| Busiest-minute node count: too few | 11% | 44% |
+| Busiest-minute node count: one too many | 17% | 1% |
+| Busiest-minute node count: two or more too many | 4% | 0% |
+
+Assuming nothing changes misses the node the next hour needs 44% of the
+time; the forecast cuts that to 11%, at the cost of asking for one node
+more than needed 17% of the time, since it plans for the busy case.
+Re-run with `scripts/eval_node_forecast.py`.
 
 **Measured live, on your cluster.** Each forecast of a pool's requested CPU
 is logged and scored against what was then requested, next to "same as
