@@ -18,6 +18,10 @@ from scalescope.capacity import (
 # SCALESCOPE_HISTORY_STEPS rows and replay at most 5000, so a day covers
 # both at any tick of 2s or more.
 DEFAULT_RETENTION_HOURS = 24.0
+# Minute rollups for the long-memory model: four weekly cycles plus margin.
+DEFAULT_HISTORY_RETENTION_DAYS = 35.0
+# The long-memory model is trained for horizons up to this.
+MAX_LONG_HORIZON_MINUTES = 120
 
 Mode = Literal["demo", "observe"]
 
@@ -170,6 +174,22 @@ class Settings:
             "SCALESCOPE_SCALE_DOWN_STABILIZATION_SECONDS", 0.0
         )
     )
+    # How long a new pod takes to serve traffic, including any node the
+    # cluster autoscaler must add first. Pods are requested this far ahead.
+    pod_startup_seconds: float = field(
+        default_factory=lambda: _float_env("SCALESCOPE_POD_STARTUP_SECONDS", 30.0)
+    )
+    long_horizon_minutes: int = field(
+        default_factory=lambda: _int_env("SCALESCOPE_LONG_HORIZON_MINUTES", 60)
+    )
+    history_retention_days: float = field(
+        default_factory=lambda: _float_env(
+            "SCALESCOPE_HISTORY_RETENTION_DAYS", DEFAULT_HISTORY_RETENTION_DAYS
+        )
+    )
+    retrain_minutes: float = field(
+        default_factory=lambda: _float_env("SCALESCOPE_RETRAIN_MINUTES", 15.0)
+    )
     retention_hours: float = field(
         default_factory=lambda: _float_env(
             "SCALESCOPE_RETENTION_HOURS", DEFAULT_RETENTION_HOURS
@@ -261,12 +281,51 @@ class Settings:
             raise ValueError(
                 "SCALESCOPE_RETENTION_HOURS must be a finite number greater than 0"
             )
+        if not (
+            math.isfinite(self.pod_startup_seconds) and self.pod_startup_seconds > 0
+        ):
+            raise ValueError(
+                "SCALESCOPE_POD_STARTUP_SECONDS must be a finite number greater than 0"
+            )
+        if not (
+            2 * self.startup_lead_minutes
+            <= self.long_horizon_minutes
+            <= MAX_LONG_HORIZON_MINUTES
+        ):
+            raise ValueError(
+                "SCALESCOPE_LONG_HORIZON_MINUTES must be between twice the pod "
+                f"startup time in minutes and {MAX_LONG_HORIZON_MINUTES}"
+            )
+        if not (
+            math.isfinite(self.history_retention_days)
+            and self.history_retention_days > 0
+        ):
+            raise ValueError(
+                "SCALESCOPE_HISTORY_RETENTION_DAYS must be a finite number greater "
+                "than 0"
+            )
+        if not (math.isfinite(self.retrain_minutes) and self.retrain_minutes > 0):
+            raise ValueError(
+                "SCALESCOPE_RETRAIN_MINUTES must be a finite number greater than 0"
+            )
         if not 0 < self.target_utilization <= 1:
             raise ValueError("SCALESCOPE_TARGET_UTILIZATION must be in (0, 1]")
         if bool(self.auth_username) != bool(self.auth_password):
             raise ValueError(
                 "SCALESCOPE_AUTH_USERNAME and SCALESCOPE_AUTH_PASSWORD must be set together"
             )
+
+    @property
+    def startup_lead_steps(self) -> int:
+        """Pod startup time in ticks: how far ahead the short-term forecast looks."""
+        return max(
+            1, math.ceil(self.pod_startup_seconds / self.simulation_tick_seconds)
+        )
+
+    @property
+    def startup_lead_minutes(self) -> int:
+        """Pod startup time in whole minutes, the long-memory forecast's step."""
+        return max(1, math.ceil(self.pod_startup_seconds / 60))
 
     @property
     def scaling_policy(self) -> ScalingPolicy:

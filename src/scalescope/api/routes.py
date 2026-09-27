@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib.metadata import version as _package_version
 from typing import Any
 
@@ -13,7 +13,6 @@ from fastapi import APIRouter, HTTPException, Query
 
 from scalescope.capacity import (
     HPA_SCALE_DOWN_STABILIZATION_SECONDS,
-    STARTUP_LEAD_STEPS,
     CapacityRecommendation,
     PodCapacity,
     recommend_replicas,
@@ -23,6 +22,7 @@ from scalescope.config import settings
 from scalescope.demand import DemandSignal, demand_history, demand_signal
 from scalescope.diagnosis import DIAGNOSIS_WINDOW_STEPS, DiagnosisResult, diagnose
 from scalescope.k8s_collector import workload_id
+from scalescope.learning import Learner
 from scalescope.models.base import Forecast
 from scalescope.models.registry import ACTUATION_MODEL, MODELS
 from scalescope.replay import REPLAY_MAX_OBSERVATIONS, REPLAY_MIN_HISTORY, replay_score
@@ -52,6 +52,11 @@ _forecast_cache: dict[tuple[str, str, DemandSignal], tuple[Any, Forecast]] = {}
 def get_store() -> Store:
     store: Store = app_state["store"]
     return store
+
+
+def get_learner() -> Learner:
+    learner: Learner = app_state["learner"]
+    return learner
 
 
 @router.get("/source")
@@ -159,9 +164,17 @@ def _diagnose(df: pl.DataFrame) -> DiagnosisResult:
     return diagnose(df, max_replicas=settings.max_replicas)
 
 
-def _capacity(df: pl.DataFrame, signal: DemandSignal) -> PodCapacity:
+def _capacity(
+    df: pl.DataFrame, signal: DemandSignal, workload: str | None = None
+) -> PodCapacity:
+    """Per-pod capacity; with `workload`, prefers the one learned from weeks of data."""
+    learned = (
+        get_learner().learned_capacity(workload, signal)
+        if workload is not None
+        else None
+    )
     return resolve_capacity(
-        df, signal, settings.capacity_per_pod_rps, settings.latency_slo_ms
+        df, signal, settings.capacity_per_pod_rps, settings.latency_slo_ms, learned
     )
 
 
@@ -186,14 +199,17 @@ def _compute_recommendation(
     signal: DemandSignal,
     capacity: PodCapacity,
 ) -> dict[str, Any]:
+    long_forecast = get_learner().forecast(workload, signal, datetime.now(UTC))
     rec: CapacityRecommendation = recommend_replicas(
         # spec.replicas, not status: status lags a scale write by many seconds.
         int(df["desired_replicas"][-1]),
         _get_forecast(workload, model, df, signal),
         capacity,
         settings.scaling_policy,
-        peak_step=STARTUP_LEAD_STEPS,
+        peak_step=settings.startup_lead_steps,
         scaling_will_help=diag.scaling_will_help,
+        long_forecast=long_forecast,
+        lead_minutes=settings.startup_lead_minutes,
     )
     return {
         "workload": workload,
@@ -210,7 +226,13 @@ def _compute_recommendation(
         "latency_model": _capacity_summary(capacity),
         "hold_reason": rec.hold_reason,
         "pods_needed": rec.pods_needed,
-        "startup_lead_steps": STARTUP_LEAD_STEPS,
+        "startup_lead_steps": settings.startup_lead_steps,
+        "anticipated": rec.anticipated,
+        "long_term_peak_p90": (
+            float(long_forecast.p90[: 2 * settings.startup_lead_minutes].max())
+            if long_forecast is not None
+            else None
+        ),
         "scaling_will_help": diag.scaling_will_help,
         "diagnosis": diag.diagnosis.value,
         "explanation": diag.explanation,
@@ -224,7 +246,7 @@ def get_recommendation(workload: str, model: str = ACTUATION_MODEL) -> dict[str,
     df = _recent_observations_or_404(workload, _HISTORY_STEPS)
     signal = demand_signal(df)
     return _compute_recommendation(
-        workload, model, df, _diagnose(df), signal, _capacity(df, signal)
+        workload, model, df, _diagnose(df), signal, _capacity(df, signal, workload)
     )
 
 
@@ -234,7 +256,7 @@ def get_all_recommendations(workload: str) -> dict[str, Any]:
     df = _recent_observations_or_404(workload, _HISTORY_STEPS)
     diag = _diagnose(df)
     signal = demand_signal(df)
-    capacity = _capacity(df, signal)
+    capacity = _capacity(df, signal, workload)
     return {
         "workload": workload,
         "diagnosis": diag.diagnosis.value,
@@ -304,6 +326,7 @@ def get_scaling_replay(workload: str) -> dict[str, Any]:
         MODELS[ACTUATION_MODEL],
         _HORIZON_STEPS,
         _HISTORY_STEPS,
+        lead_steps=settings.startup_lead_steps,
         hpa_stabilization_ticks=round(HPA_SCALE_DOWN_STABILIZATION_SECONDS / tick),
         scale_down_stabilization_ticks=round(
             settings.scale_down_stabilization_seconds / tick
@@ -322,6 +345,63 @@ def get_scaling_replay(workload: str) -> dict[str, Any]:
         "decision_every_seconds": round(result.decision_every * tick, 1),
         "capacity_source": capacity.source,
         "outcomes": [vars(outcome) for outcome in result.outcomes],
+    }
+
+
+# The learning chart: the last hours of minute history, then the forecast.
+_LEARNING_CHART_HOURS = 6
+
+
+@router.get("/workloads/{workload}/learning")
+def get_learning(workload: str) -> dict[str, Any]:
+    """What the long-memory model has learned about this workload, and how well.
+
+    Accuracy is live: each forecast is scored against what then happened,
+    next to a "no change" baseline (see `scalescope.learning`).
+    """
+    df = _recent_observations_or_404(workload, _HISTORY_STEPS)
+    signal = demand_signal(df)
+    learner = get_learner()
+    now = datetime.now(UTC)
+    status = learner.status(workload, now)
+    history = learner.minute_history(workload, now)
+    recent = history.filter(
+        pl.col("minute")
+        >= now.replace(tzinfo=None) - timedelta(hours=_LEARNING_CHART_HOURS)
+    )
+    column = "request_rate" if signal == "request_rate" else "cpu_usage_millicores"
+    forecast = learner.forecast(workload, signal, now)
+    return {
+        "workload": workload,
+        "demand_signal": signal,
+        "history_days": round(status.history_minutes / 1440, 2),
+        "trained_at": status.trained_at,
+        "knows_daily_pattern": status.knows_daily_pattern,
+        "knows_weekly_pattern": status.knows_weekly_pattern,
+        "retrain_minutes": settings.retrain_minutes,
+        "accuracy": {
+            "scored_minutes": status.scored_minutes,
+            "model_error": status.model_error,
+            "baseline_error": status.baseline_error,
+            "p90_coverage": status.p90_coverage,
+            "daily_model_error": [
+                {"day": day, "error": error} for day, error in status.daily_model_error
+            ],
+        },
+        "history": {
+            "minutes": recent["minute"].to_list(),
+            "values": recent[column].to_list(),
+        },
+        "forecast": (
+            {
+                "start": now.replace(second=0, microsecond=0),
+                "p10": forecast.p10.tolist(),
+                "p50": forecast.p50.tolist(),
+                "p90": forecast.p90.tolist(),
+            }
+            if forecast is not None
+            else None
+        ),
     }
 
 

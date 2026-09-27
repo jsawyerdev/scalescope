@@ -33,7 +33,6 @@ HPA_SCALE_DOWN_STABILIZATION_SECONDS = 300.0
 MAX_SCALE_UP_PER_STEP = 4
 MAX_SCALE_DOWN_PER_STEP = 2
 MIN_CONFIDENCE_TO_SCALE = 0.10
-STARTUP_LEAD_STEPS = 15  # pod startup + readiness lag, in ticks
 
 # Samples outside this CPU band say little about per-pod throughput: near
 # zero the ratio is dominated by idle overhead, near the top usage is
@@ -93,6 +92,10 @@ class CapacityRecommendation:
     hold_reason: HoldReason | None
     # Pods the p90 forecast needs at each horizon step; None without capacity.
     pods_needed: list[int] | None
+    # True when the long-memory forecast changed the count the short-term
+    # forecast alone would give: demand usually rises within the pod startup
+    # time, or returns soon enough that pods are kept.
+    anticipated: bool = False
 
 
 def estimate_capacity_per_pod(observations: pl.DataFrame) -> float | None:
@@ -156,12 +159,14 @@ def resolve_capacity(
     signal: DemandSignal,
     configured_rps: float | None,
     latency_slo_ms: float | None = None,
+    learned: PodCapacity | None = None,
 ) -> PodCapacity:
     """Per-pod capacity in the unit of `signal`.
 
     CPU demand: the latest per-pod CPU request. Request-rate demand: the
-    operator's configured value if set, else the latency model, else an
-    estimate from CPU history.
+    operator's configured value if set; else `learned`, the latency model
+    fitted on weeks of minute history (`scalescope.learning`); else the
+    latency model on `observations`; else an estimate from CPU history.
     """
     if signal == "cpu_millicores":
         requests = observations["cpu_request_millicores"].drop_nulls()
@@ -171,6 +176,8 @@ def resolve_capacity(
         return PodCapacity(None, "unavailable")
     if configured_rps is not None:
         return PodCapacity(configured_rps, "configured")
+    if learned is not None:
+        return learned
     from_latency = latency_capacity(observations, latency_slo_ms)
     if from_latency is not None:
         return from_latency
@@ -187,6 +194,8 @@ def recommend_replicas(
     policy: ScalingPolicy,
     peak_step: int | None = None,
     scaling_will_help: bool = True,
+    long_forecast: Forecast | None = None,
+    lead_minutes: int = 1,
 ) -> CapacityRecommendation:
     """Recommend replicas to serve the P90 forecast at the target utilization.
 
@@ -197,12 +206,26 @@ def recommend_replicas(
     removed that the forecast says will be needed again. The current count
     is kept when capacity is unknown, the forecast is too uncertain, or
     `scaling_will_help` is False.
+
+    `long_forecast` (per minute, from the long-memory model) extends both
+    windows past the short-term horizon: scale up for its peak within
+    `lead_minutes` (the pod startup time), and keep pods it needs within
+    twice that. A removed pod is re-added a startup time ahead of need, so
+    keeping it longer than that only buys margin against forecast error.
     """
     lead_window = (
         forecast.p90[: peak_step + 1] if peak_step is not None else forecast.p90
     )
     lead_peak = float(lead_window.max()) if len(lead_window) else 0.0
     peak_demand = float(forecast.p90.max()) if len(forecast.p90) else 0.0
+    planned_lead_peak, planned_hold_peak = lead_peak, peak_demand
+    if long_forecast is not None and len(long_forecast.p90):
+        planned_lead_peak = max(
+            lead_peak, float(long_forecast.p90[:lead_minutes].max())
+        )
+        planned_hold_peak = max(
+            peak_demand, float(long_forecast.p90[: 2 * lead_minutes].max())
+        )
 
     band_width = (
         float((forecast.p90 - forecast.p10).mean()) if len(forecast.p90) else 0.0
@@ -219,6 +242,7 @@ def recommend_replicas(
 
     recommended = current_replicas
     pods_needed: list[int] | None = None
+    anticipated = False
     if capacity.per_pod is not None:
         safe_capacity_per_pod = capacity.per_pod * capacity.utilization(policy)
 
@@ -226,14 +250,21 @@ def recommend_replicas(
             required = math.ceil(demand / safe_capacity_per_pod)
             return max(policy.min_replicas, min(policy.max_replicas, required))
 
+        def decide(scale_up_to: int, hold_at: int) -> int:
+            if scale_up_to > current_replicas:
+                return min(scale_up_to, current_replicas + MAX_SCALE_UP_PER_STEP)
+            if hold_at < current_replicas:
+                return max(hold_at, current_replicas - MAX_SCALE_DOWN_PER_STEP)
+            return current_replicas
+
         pods_needed = [pods_for(float(demand)) for demand in forecast.p90]
         if hold_reason is None:
-            scale_up_to = pods_for(lead_peak)
-            hold_at = pods_for(peak_demand)
-            if scale_up_to > current_replicas:
-                recommended = min(scale_up_to, current_replicas + MAX_SCALE_UP_PER_STEP)
-            elif hold_at < current_replicas:
-                recommended = max(hold_at, current_replicas - MAX_SCALE_DOWN_PER_STEP)
+            recommended = decide(
+                pods_for(planned_lead_peak), pods_for(planned_hold_peak)
+            )
+            anticipated = recommended != decide(
+                pods_for(lead_peak), pods_for(peak_demand)
+            )
 
     projected_utilization = (
         peak_demand / (recommended * capacity.per_pod)
@@ -250,6 +281,7 @@ def recommend_replicas(
         capacity=capacity,
         hold_reason=hold_reason,
         pods_needed=pods_needed,
+        anticipated=anticipated,
     )
 
 

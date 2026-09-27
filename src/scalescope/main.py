@@ -15,10 +15,10 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from scalescope import demo_history
 from scalescope.api.routes import router
 from scalescope.auth import BasicAuthMiddleware
 from scalescope.capacity import (
-    STARTUP_LEAD_STEPS,
     ScaleDownStabilizer,
     recommend_replicas,
     resolve_capacity,
@@ -34,9 +34,10 @@ from scalescope.k8s_collector import (
     PrometheusQueries,
     workload_id,
 )
+from scalescope.learning import ACCURACY_DAYS, Learner
 from scalescope.logging_config import configure_logging
 from scalescope.models.registry import ACTUATION_MODEL, MODELS
-from scalescope.simulator import WorkloadSimulator
+from scalescope.simulator import WorkloadSimulator, WorkloadState
 from scalescope.state import app_state
 from scalescope.storage import Store
 
@@ -46,6 +47,10 @@ logger = logging.getLogger(__name__)
 # Retention is enforced this often rather than every tick: a DELETE scans
 # the table, and data only needs to stay roughly within the window.
 _PRUNE_EVERY_TICKS = 300
+# Minute rollups run each minute and rescan this far back, so a late or
+# missed run still rolls up every complete minute.
+_ROLLUP_EVERY_SECONDS = 60.0
+_ROLLUP_LOOKBACK = timedelta(hours=1)
 
 
 def _init_source_state() -> dict[str, Any]:
@@ -75,6 +80,11 @@ def _init_source_state() -> dict[str, Any]:
         "last_actuation_ts": None,
         "last_actuation_replicas": None,
         "last_actuation_error": None,
+        # DEMO starts with generated history so the long-memory model has
+        # weeks to learn from; the dashboard says so.
+        "demo_history_days": (
+            demo_history.DEMO_HISTORY_DAYS if settings.mode == "demo" else None
+        ),
     }
 
 
@@ -88,7 +98,9 @@ async def _prune_if_due(store: Store, tick: int) -> None:
 
 
 async def _simulation_loop(store: Store) -> None:
-    simulator = WorkloadSimulator()
+    simulator = WorkloadSimulator(
+        demand_level=lambda: demo_history.demand_level(datetime.now(UTC))
+    )
     app_state["simulator"] = simulator
     tick = 0
     while True:
@@ -124,6 +136,7 @@ def _target_dicts(
 
 def _actuate(
     store: Store,
+    learner: Learner,
     actuator: KubernetesActuator,
     target: KubernetesWorkloadTarget,
     stabilizer: ScaleDownStabilizer,
@@ -139,8 +152,13 @@ def _actuate(
         return
 
     signal = demand_signal(df)
+    now = datetime.now(UTC)
     capacity = resolve_capacity(
-        df, signal, settings.capacity_per_pod_rps, settings.latency_slo_ms
+        df,
+        signal,
+        settings.capacity_per_pod_rps,
+        settings.latency_slo_ms,
+        learner.learned_capacity(target.workload_id, signal),
     )
     if capacity.per_pod is None:
         source["last_actuation_error"] = (
@@ -164,7 +182,9 @@ def _actuate(
             forecast,
             capacity,
             settings.scaling_policy,
-            peak_step=STARTUP_LEAD_STEPS,
+            peak_step=settings.startup_lead_steps,
+            long_forecast=learner.forecast(target.workload_id, signal, now),
+            lead_minutes=settings.startup_lead_minutes,
         ).recommended_replicas,
     )
     if recommended == current_replicas:
@@ -180,7 +200,7 @@ def _actuate(
         source["last_actuation_error"] = str(exc)
 
 
-async def _observe_loop(store: Store) -> None:
+async def _observe_loop(store: Store, learner: Learner) -> None:
     source = app_state["source"]
     metrics_urls = _metrics_urls_by_target()
     primary_target = KubernetesWorkloadTarget(
@@ -244,7 +264,7 @@ async def _observe_loop(store: Store) -> None:
                 row["workload"] for row in result.rows
             }:
                 await asyncio.to_thread(
-                    _actuate, store, actuator, primary_target, stabilizer
+                    _actuate, store, learner, actuator, primary_target, stabilizer
                 )
 
             source["connected"] = True
@@ -266,45 +286,91 @@ async def _observe_loop(store: Store) -> None:
         await asyncio.sleep(settings.simulation_tick_seconds)
 
 
+def _retrain_all(store: Store, learner: Learner) -> None:
+    now = datetime.now(UTC)
+    for workload in store.workloads():
+        recent = store.recent_observations(workload, settings.history_window_steps)
+        if recent.is_empty():
+            continue
+        try:
+            learner.retrain(workload, demand_signal(recent), now)
+        except Exception:
+            # One workload's bad history must not stop the others learning.
+            logger.exception("long-memory training failed for %s", workload)
+
+
+async def _history_loop(store: Store, learner: Learner) -> None:
+    """Roll observations up into minute history, and retrain on schedule."""
+    await asyncio.to_thread(store.roll_up_minutes, datetime.now(UTC))
+    await asyncio.to_thread(_retrain_all, store, learner)
+    last_trained = time.monotonic()
+    while True:
+        await asyncio.sleep(_ROLLUP_EVERY_SECONDS)
+        now = datetime.now(UTC)
+        await asyncio.to_thread(store.roll_up_minutes, now, now - _ROLLUP_LOOKBACK)
+        await asyncio.to_thread(
+            store.prune_minutes,
+            now - timedelta(days=settings.history_retention_days),
+        )
+        await asyncio.to_thread(
+            store.prune_forecast_log, now - timedelta(days=ACCURACY_DAYS)
+        )
+        if time.monotonic() - last_trained >= settings.retrain_minutes * 60:
+            await asyncio.to_thread(_retrain_all, store, learner)
+            last_trained = time.monotonic()
+
+
 def _record_background_failure(task: asyncio.Task[None]) -> None:
     if task.cancelled():
         return
     try:
         task.result()
     except Exception as exc:
-        logger.exception("data source task stopped unexpectedly")
+        logger.exception("background task %s stopped unexpectedly", task.get_name())
         source = app_state.get("source")
         if source is not None:
             source["connected"] = False
-            source["last_error"] = f"data source task stopped: {exc}"
+            source["last_error"] = f"{task.get_name()} stopped: {exc}"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     store = Store(settings.db_path)
+    learner = Learner(store, settings.long_horizon_minutes, settings.latency_slo_ms)
     app_state["store"] = store
+    app_state["learner"] = learner
     app_state["source"] = _init_source_state()
 
     if settings.mode == "demo":
-        task = asyncio.create_task(_simulation_loop(store))
+        await asyncio.to_thread(
+            demo_history.backfill, store, WorkloadState().name, datetime.now(UTC)
+        )
+        source_loop = _simulation_loop(store)
         logger.info("demo simulation loop started")
     else:
-        task = asyncio.create_task(_observe_loop(store))
+        source_loop = _observe_loop(store, learner)
         logger.info(
             "observe loop started for %s/%s",
             settings.k8s_namespace,
             settings.k8s_deployment,
         )
-    task.add_done_callback(_record_background_failure)
-    app_state["data_source_task"] = task
+    tasks = [
+        asyncio.create_task(source_loop, name="data source"),
+        asyncio.create_task(_history_loop(store, learner), name="history"),
+    ]
+    for task in tasks:
+        task.add_done_callback(_record_background_failure)
+    app_state["background_tasks"] = tasks
 
     try:
         yield
     finally:
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
-        app_state.pop("data_source_task", None)
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with suppress(asyncio.CancelledError):
+                await task
+        app_state.pop("background_tasks", None)
         store.close()
 
 
@@ -315,12 +381,17 @@ app = FastAPI(title="ScaleScope", lifespan=lifespan)
 def healthz() -> dict[str, str] | JSONResponse:
     """Unauthenticated liveness check - the only route BasicAuthMiddleware exempts.
 
-    503 once the data-source loop has stopped (it failed to start or crashed):
-    nothing restarts it in-process, so the kubelet must restart the pod.
+    503 once a background loop (data source or history) has stopped, having
+    failed to start or crashed: nothing restarts it in-process, so the
+    kubelet must restart the pod.
     """
-    task = app_state.get("data_source_task")
-    if task is not None and task.done():
-        return JSONResponse({"status": "data source stopped"}, status_code=503)
+    stopped = [
+        task.get_name() for task in app_state.get("background_tasks", []) if task.done()
+    ]
+    if stopped:
+        return JSONResponse(
+            {"status": f"{', '.join(stopped)} stopped"}, status_code=503
+        )
     return {"status": "ok"}
 
 

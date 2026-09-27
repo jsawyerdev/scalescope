@@ -65,11 +65,11 @@ scans every pull request.
 
 | Path | What it is |
 |---|---|
-| `src/scalescope/` | The app: collector, forecast models, performance model, capacity policy, diagnosis, API, dashboard (`static/`) |
+| `src/scalescope/` | The app: collector, short-term and long-memory forecast models, learning service, performance model, capacity policy, diagnosis, API, dashboard (`static/`) |
 | `tests/` | pytest suite |
 | `k8s/` | Kustomize install (`k8s/scalescope`), optional actuation RBAC, local-Docker RBAC |
 | `sample-workload/` | A small app with its own varying load, for trying ScaleScope end to end |
-| `scripts/` | Rebuild, kubeconfig, release-notes, and LightGBM tuning tools |
+| `scripts/` | Rebuild, kubeconfig, release notes, LightGBM tuning, and the long-memory accuracy evaluation (`eval_long_memory.py`) |
 | `examples/` | The deployment guide and namespace-scoped RBAC examples |
 
 ## Releasing (maintainers)

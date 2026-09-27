@@ -21,7 +21,7 @@ body:
     attributes:
       label: ScaleScope version
       description: Shown in the dashboard footer and by `curl /api/source`.
-      placeholder: "0.15.1"
+      placeholder: "0.16.0"
     validations:
       required: true
   - type: dropdown

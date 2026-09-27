@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import math
 import random
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -30,6 +31,17 @@ QUEUEING_P95_COEFFICIENT = math.log(20) * 1000
 OVERLOAD_LATENCY_MS = 2000.0
 BASE_MEMORY_MB = 180.0
 FAULTS = ("traffic_spike", "memory_leak", "cpu_limit", "node_capacity")
+
+
+def latency_p95_ms(
+    load_per_pod: float, capacity_per_pod: float = CAPACITY_PER_POD_RPS
+) -> float:
+    """p95 latency of one pod as an M/M/1 queue, capped once it saturates."""
+    headroom = capacity_per_pod - load_per_pod
+    queueing_ms = (
+        QUEUEING_P95_COEFFICIENT / headroom if headroom > 0 else OVERLOAD_LATENCY_MS
+    )
+    return min(OVERLOAD_LATENCY_MS, BASE_LATENCY_MS + queueing_ms)
 
 
 @dataclass
@@ -52,12 +64,22 @@ class WorkloadState:
 class WorkloadSimulator:
     """Advances one synthetic workload by one observation per call to `step`."""
 
-    def __init__(self, state: WorkloadState | None = None) -> None:
+    def __init__(
+        self,
+        state: WorkloadState | None = None,
+        demand_level: Callable[[], float] | None = None,
+    ) -> None:
+        """`demand_level`, if given, replaces the built-in ten-minute cycle."""
         self.state = state or WorkloadState()
+        self._demand_level = demand_level
 
     def _demand(self) -> float:
         t = self.state.tick
-        daily = math.sin(2 * math.pi * t / 300) * 400 + 700
+        daily = (
+            self._demand_level()
+            if self._demand_level is not None
+            else math.sin(2 * math.pi * t / 300) * 400 + 700
+        )
         noise = self.state.rng.gauss(0, 25)
         spike = 600 if self.state.active_fault == "traffic_spike" else 0
         return max(50.0, daily + noise + spike)
@@ -149,12 +171,8 @@ class WorkloadSimulator:
 
         # Each pod is a queue: latency climbs as its load nears capacity.
         load_per_pod = demand / self.state.replicas
-        headroom = effective_capacity_per_pod - load_per_pod
-        queueing_ms = (
-            QUEUEING_P95_COEFFICIENT / headroom if headroom > 0 else OVERLOAD_LATENCY_MS
-        )
-        latency_p95_ms = min(
-            OVERLOAD_LATENCY_MS, BASE_LATENCY_MS + queueing_ms
+        latency = latency_p95_ms(
+            load_per_pod, effective_capacity_per_pod
         ) * self.state.rng.gauss(1.0, 0.05)
         error_rate = (
             max(0.0, min(1.0, (utilization_per_pod - 0.95) * 2))
@@ -183,7 +201,7 @@ class WorkloadSimulator:
             "cpu_usage_pct": round(cpu_usage_pct, 2),
             "cpu_throttled_pct": round(cpu_throttled_pct, 2),
             "memory_usage_mb": round(memory_usage_mb, 2),
-            "latency_p95_ms": round(max(0.0, latency_p95_ms), 2),
+            "latency_p95_ms": round(max(0.0, latency), 2),
             "error_rate": round(error_rate, 4),
             "pending_pods": pending_pods,
             "restarts": restarts,
