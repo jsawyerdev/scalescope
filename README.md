@@ -5,24 +5,56 @@
 [![Release](https://img.shields.io/github/v/release/jsawyerdev/scalescope)](https://github.com/jsawyerdev/scalescope/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
-Explainable predictive Kubernetes capacity intelligence lab. Forecasts near-term
-demand for a workload, computes the replica count required to satisfy it, and
-runs that alongside a deterministic diagnosis engine that flags when scaling is
-the wrong response (CPU limit throttling, memory leak, node capacity exhaustion,
-HPA ceiling, non-CPU bottleneck).
+Predictive autoscaling for Kubernetes that learns each workload's traffic
+pattern from its own history, scales up before the busy period arrives, and
+releases pods when the forecast says they will not be needed. The longer it
+watches a workload, the better it knows it: after a day it has the daily
+cycle, after a week the weekly one, and its forecasts keep improving for
+about three weeks. It also tells you when adding pods is the wrong fix.
 
-## Status: v0.15.1 (sizes pods from each workload's own latency curve, a queueing model fitted from its history; replays scaling decisions against a reactive HPA; throttling, latency, and errors for every workload from Prometheus)
+## Who it's for
+
+**For** teams running request-serving workloads (APIs, web backends,
+gateways) on Kubernetes whose traffic repeats: busy days and quiet nights,
+weekdays unlike weekends. It pays off most when new pods take time to
+serve, because they are slow to start or need the cluster autoscaler to add
+a node first: a reactive autoscaler only starts pods once the load has
+already arrived, and ScaleScope starts them a pod-startup time ahead.
+
+**Not for** queue or batch workers, where the backlog is the signal (KEDA
+fits better); traffic with no repeating pattern, where no model has
+anything to learn; or clusters without metrics-server.
+
+## What it does
+
+1. **Watches** every Deployment it can read, through metrics-server and,
+   optionally, Prometheus. Read-only unless you turn on actuation.
+2. **Learns** each workload's daily and weekly demand pattern from weeks of
+   minute-level history with a LightGBM model, retrained every 15 minutes,
+   and checks every forecast against what actually happened (see "How it
+   learns").
+3. **Sizes pods** from the workload's own latency curve: how busy a pod can
+   run before responses slow down (see "Performance model").
+4. **Decides** the pod count: enough for the busy case one pod-startup time
+   ahead, and pods kept only while the forecast needs them back soon.
+5. **Diagnoses** when more pods will not help (CPU limits, a probable memory
+   leak, no room on the nodes) and holds instead.
+6. **Proves it** on your own data: the dashboard shows the model's live
+   accuracy, and a replay compares its decisions with a standard HPA's.
+
+## Status: v0.16.0 (learns each workload's daily and weekly pattern from weeks of history; forecasts an hour ahead and scales a pod-startup time early)
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed at each version.
 
 Created by James Sawyer. Open source under the [Apache License 2.0](LICENSE);
 contributions are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-ScaleScope is a working lab with two supported runtime modes:
+Two runtime modes:
 
-- **`SCALESCOPE_MODE=demo`** (default): entirely self-contained against a
-  synthetic workload simulator, no Kubernetes cluster needed — `docker
-  compose up --build` and you're watching data within seconds.
+- **`SCALESCOPE_MODE=demo`** (default): self-contained, no Kubernetes
+  cluster needed. `docker compose up --build` starts a simulated workload
+  with three weeks of generated history, so the learned forecast is visible
+  within a minute.
 - **`SCALESCOPE_MODE=observe`**: discovers Deployments across
   `SCALESCOPE_K8S_NAMESPACES`, reads their replicas/CPU/memory from the
   Kubernetes API and metrics-server, and shows them as selectable
@@ -57,13 +89,75 @@ through the kubelet (`nodes/proxy`, which also grants exec-level access to
 every pod on the node) or cAdvisor; that privilege is not worth a signal
 that rarely drives replica counts, so ScaleScope does not ask for it.
 
+## How it learns
+
+ScaleScope forecasts on two timescales and plans with both:
+
+| | Short-term | Long-memory |
+|---|---|---|
+| Learns from | the last 20 minutes (`SCALESCOPE_HISTORY_STEPS` ticks) | up to 28 days of minute history, kept 35 days |
+| Forecasts | the next minute, tick by tick | the next hour, minute by minute |
+| Catches | what is happening now: a spike, a fault | what usually happens next: the morning ramp, the evening fall, the weekend |
+| Model | AutoETS (see "Forecast models") | LightGBM quantile regression (`models/seasonal.py`) |
+
+**The data.** Every minute, the raw observations (kept 24 hours) are rolled
+up into one row per workload per minute and kept for
+`SCALESCOPE_HISTORY_RETENTION_DAYS` (35): about 7 MB per workload.
+
+**The model.** For each minute of the next hour it predicts p10, p50, and
+p90 demand from the time of day, the day of week, what demand was at that
+time yesterday, two days ago, last week, and two weeks ago, and how today
+compares with yesterday and last week so far. Every feature is relative to
+the current level, so it learns the *shape* of the pattern and follows
+growth without retraining. It is retrained every `SCALESCOPE_RETRAIN_MINUTES`
+(15) on up to the last 28 days, which takes 0.2 s per workload on a day of
+history and 3.5 s on four weeks.
+
+**How decisions use it.** Pods are requested `SCALESCOPE_POD_STARTUP_SECONDS`
+ahead of need (default 30; set it to how long a new pod takes to serve,
+including any node the cluster autoscaler must add). ScaleScope scales up
+for the busiest minute either forecast expects within that time, and keeps
+pods the long-memory forecast needs back within twice that time; beyond
+that, a released pod can be started again in time. The recommendation says
+when the learned pattern changed the decision.
+
+**Measured.** Minute-level synthetic traffic with the structure real
+services show: a business-day cycle, quieter weekends, 10% growth over five
+weeks, slow "busier than usual" drift, random spikes, and a holiday. Three
+independent histories; forecasts made every 4 hours through the final week,
+each from the history available at that moment:
+
+| History | 1 day | 2 days | 7 days | 14 days | 21 days | 28 days |
+|---|---|---|---|---|---|---|
+| Error forecasting the next hour | 9.2% | 8.2% | 8.0% | 6.4% | 5.9% | 6.1% |
+| "Same as now" error | 11.1% | 11.1% | 11.1% | 11.1% | 11.1% | 11.1% |
+| Minutes at or below the p90 line | 82% | 80% | 86% | 87% | 88% | 89% |
+
+Error is mean absolute error as a share of demand. The model beats assuming
+nothing changes from its first day, and by three weeks its error is about
+half; beyond that it levels off. Its p90 line converges on the intended
+90%. The 30-minute results follow the same pattern (8.0% to 5.5%, against
+8.7%). Re-run with `scripts/eval_long_memory.py`.
+
+**Measured live, on your workload.** Every forecast is logged and, once its
+minutes have passed, scored against what actually happened next to the
+"same as now" baseline. The dashboard's "What it has learned" panel shows
+that score for the last week: accuracy on data the model never saw.
+
+**What it cannot learn.** Nothing in the first day (scaling then uses the
+short-term forecast alone, as before). One-off events with no history:
+a launch, a marketing email, a holiday it has not seen; the short-term
+forecast and the diagnosis still react, but late. Time features are UTC,
+so a daylight-saving change shifts the learned pattern by an hour until a
+week of history on the new time accumulates.
+
 ## Deploy to any cluster
 
 Requirements: metrics-server (most managed clusters ship it), and CPU
 requests on the Deployments you want recommendations for.
 
 ```
-kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.15.1"
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.16.0"
 kubectl -n scalescope-system port-forward svc/scalescope 8000:80
 ```
 
@@ -74,6 +168,9 @@ ServiceAccount can read. **The step-by-step guide, including configuration,
 turning on autoscaling, exposing the dashboard, the sample workload, upgrades,
 and troubleshooting, is [examples/README.md](examples/README.md).** Optional:
 
+- `SCALESCOPE_POD_STARTUP_SECONDS`: how long a new pod takes to serve,
+  including a new node if the cluster autoscaler must add one (default 30).
+  Set it to what you actually see: pods are started this far ahead of need.
 - `SCALESCOPE_PROMETHEUS_URL`: per-pod request rate, CPU throttling, p95
   latency, and error rate, one instant query each per tick; every series must
   carry `namespace` and `pod` labels (defaults in "Run it"). ScaleScope
@@ -90,7 +187,7 @@ and troubleshooting, is [examples/README.md](examples/README.md).** Optional:
 
 ## Screenshots
 
-All three captured from a real running DEMO instance (no cluster involved)
+All captured from a real running DEMO instance (no cluster involved)
 against the built-in `sample-app` synthetic workload.
 
 ### The dashboard
@@ -114,6 +211,19 @@ The page answers three questions in order:
 
 Model comparison, the replay lab, raw observations, and cluster identity sit
 under a collapsed "Engineering details" section.
+
+### What it has learned
+
+![The learning panel: the daily and weekly pattern learned from 21 days of
+history, live accuracy against assuming nothing changes, and the last six
+hours with the next hour's forecast](docs/screenshots/learning.png)
+
+How much history the long-memory model has for the workload, whether it
+knows the daily and weekly pattern yet, and how its forecasts have scored
+against what then happened, next to the "same as now" baseline. The chart
+shows the last six hours and the next hour: expected, likely range, and the
+busy case pods are sized for. In DEMO mode the first 21 days of history are
+generated at startup, and the panel says so.
 
 ### Diagnosis catching a real problem
 
@@ -183,6 +293,7 @@ flowchart TB
         STORE[("storage.py<br/>DuckDB")]
         MODELS["models/*.py<br/>naive · seasonal_naive · ewma · linear_trend<br/>auto_ets (StatsForecast) · lightgbm_quantile"]
         PERF["performance.py<br/>queueing latency model per pod"]
+        LEARN["learning.py + models/seasonal.py<br/>minute history, daily/weekly<br/>LightGBM, live accuracy"]
         CAPACITY["capacity.py<br/>forecast to required replicas"]
         REPLAY["scaling_replay.py<br/>ScaleScope vs reactive HPA"]
         DIAGNOSIS["diagnosis.py<br/>deterministic rule engine,<br/>never calls a model"]
@@ -197,6 +308,8 @@ flowchart TB
     COLLECTOR -->|insert_observation| STORE
 
     STORE --> MODELS
+    STORE --> LEARN
+    LEARN --> CAPACITY
     STORE --> PERF
     STORE --> DIAGNOSIS
     MODELS --> CAPACITY
@@ -307,10 +420,13 @@ directly (ETS's 80% interval; independently fit quantile regressors, respectivel
 +4/-2 replicas per decision. Sizing to the median would under-provision for roughly half the
 horizon by definition. The rule is deliberately asymmetric:
 
-- **Scale up** for the p90 peak within the pod startup lead (15 ticks): pods started now are ready
-  just in time, and later peaks can wait.
+- **Scale up** for the p90 peak within the pod startup time (`SCALESCOPE_POD_STARTUP_SECONDS`,
+  15 ticks by default): pods started now are ready just in time, and later peaks can wait.
 - **Scale down** only if the p90 peak over the *whole* horizon fits in fewer pods, so no pod is
   removed that the forecast says will be needed again.
+- Once the long-memory model is trained, both windows extend past the short-term horizon: scale up
+  for its busiest minute within the startup time, and keep pods it needs within twice that time
+  (see "How it learns").
 
 Measured offline on 2,400-tick DEMO demand series with random faults (3 seeds, pods ready 15 ticks
 after a scale-up, AutoETS forecasts), against the previous rule, which scaled both ways on the
@@ -491,7 +607,11 @@ Environment variables (see `src/scalescope/config.py`):
 | `SCALESCOPE_DB_PATH` | `/data/scalescope.duckdb` | DuckDB file path |
 | `SCALESCOPE_LOG_LEVEL` | `INFO` | Python logging level |
 | `SCALESCOPE_HORIZON_STEPS` | `30` | Forecast horizon, in ticks |
-| `SCALESCOPE_HISTORY_STEPS` | `600` | Observation history window fed to models |
+| `SCALESCOPE_HISTORY_STEPS` | `600` | Observation history window fed to the short-term models |
+| `SCALESCOPE_POD_STARTUP_SECONDS` | `30` | How long a new pod takes to serve traffic, including any node the cluster autoscaler must add; pods are requested this far ahead |
+| `SCALESCOPE_LONG_HORIZON_MINUTES` | `60` | How far ahead the long-memory model forecasts; at least twice the pod startup time, at most 120 |
+| `SCALESCOPE_HISTORY_RETENTION_DAYS` | `35` | Minute history kept for the long-memory model |
+| `SCALESCOPE_RETRAIN_MINUTES` | `15` | How often each workload's long-memory model is retrained |
 | `SCALESCOPE_LIGHTGBM_CONFIG_PATH` | unset | Optional LightGBM hyperparameter JSON produced by `scripts/tune` |
 | `SCALESCOPE_K8S_NAMESPACE` | `scalescope-demo` | Primary namespace for metrics URL attachment and opt-in actuation |
 | `SCALESCOPE_K8S_DEPLOYMENT` | `sample-workload` | Primary deployment for metrics URL attachment and opt-in actuation |
@@ -842,6 +962,9 @@ triggers require that variable to be set.
 - `GET /api/workloads/{name}/replay` — backtests every model against this
   workload's recorded history (MAE/MAPE, sorted best first) — what the
   dashboard's "Replay lab" panel calls on demand
+- `GET /api/workloads/{name}/learning` — what the long-memory model has
+  learned (history, daily/weekly pattern, live accuracy against "same as
+  now"), the last 6 hours of minute history, and the next hour's forecast
 - `GET /api/workloads/{name}/scaling-replay` — ScaleScope vs a reactive HPA
   over this workload's recorded demand (see "Scaling replay")
 - `GET /api/source` — what this instance is actually observing (mode, cluster, connection status)
@@ -883,9 +1006,15 @@ The bundled DejaVu Sans Mono Regular font keeps its own license in
 
 ## Known limitations
 
-- **The latency model needs load variety.** A workload whose per-pod load
-  has always sat in a narrow band (for example, held there by an HPA) does
-  not reveal where its latency curve bends; ScaleScope then declines the fit
+- **The long-memory model needs a day of history** before it forecasts,
+  and a week before it knows the weekly pattern; until then scaling uses
+  the short-term forecast alone. See "How it learns" for what it cannot
+  learn (one-off events, a daylight-saving shift for a week).
+- **The latency model needs load variety.** It is refitted on weeks of
+  minute history once a day is available, which usually covers quiet and
+  busy periods. A workload whose per-pod load has always sat in a narrow
+  band (for example, held there by an HPA) does not reveal where its
+  latency curve bends; ScaleScope then declines the fit
   and sizes from CPU, which assumes CPU scales linearly with work. For
   workloads bound by memory, I/O, or a dependency that also lack latency
   data, set `SCALESCOPE_CAPACITY_PER_POD_RPS` from a load test.
@@ -895,8 +1024,14 @@ The bundled DejaVu Sans Mono Regular font keeps its own license in
   reads `0.0` (cAdvisor is otherwise reachable only through the kubelet's
   `nodes/proxy`, which ScaleScope does not ask for).
 - **The scaling replay is a model of the cluster**, not a recording of it:
-  pods start after a fixed 15 ticks and capacity is the fitted per-pod
-  capacity. It compares policies on the same assumptions; it does not
-  predict absolute outcomes.
+  pods start after `SCALESCOPE_POD_STARTUP_SECONDS` and capacity is the
+  fitted per-pod capacity. It replays the last few hours with the
+  short-term forecast only; the long-memory model's value is measured by its
+  live accuracy instead. It compares policies on the same assumptions; it
+  does not predict absolute outcomes.
+- **Training cost grows with workloads**: up to 3.5 s of CPU per workload
+  every `SCALESCOPE_RETRAIN_MINUTES`, on one thread. At 100 workloads with
+  four weeks of history that is about 40% of one core; raise the retrain
+  interval for larger clusters.
 - **Unannounced demand steps** are not forecastable; see "Scaling replay"
   for the pods-versus-shortfall tradeoff and the setting that controls it.

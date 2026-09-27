@@ -1,4 +1,6 @@
 const POLL_INTERVAL_MS = 3000;
+// Minute history changes once a minute, so the learning panel polls slower.
+const LEARNING_POLL_INTERVAL_MS = 60000;
 const LOG_MAX_ROWS = 40;
 // The chart shows this many forecast horizons of history, so the forecast
 // takes a readable share of the x-axis instead of a sliver at the end.
@@ -43,6 +45,8 @@ let workloadLabels = {};
 let triggerButtonsBusy = false;
 let demandChart = null;
 let podsChart = null;
+let dayChart = null;
+let lastSource = null;
 
 const workloadSelect = document.getElementById("workload-select");
 const triggerDurationSelect = document.getElementById("trigger-duration-select");
@@ -283,6 +287,12 @@ function renderDecision(rec, forecast, latest, source, horizonText) {
         ? `${pods(current)} cover the busy-case forecast for the next ${horizonText}.`
         : `${pods(current)} are enough for now. ${pods(neededAtPeak)} will be needed in about ${formatDuration((step + 1) * tickSeconds)}; they are added once that is within the pod start-up time (${leadText}).`;
   }
+  if (rec.anticipated) {
+    reason +=
+      change > 0
+        ? " This workload's learned pattern says demand usually rises within the pod start-up time, so pods are added before it arrives."
+        : " This workload's learned pattern expects demand back soon, so pods are kept rather than removed and re-added.";
+  }
   setText("decision-reason", reason);
 
   const latestValue = latest ? latest[signal.field] : Number.NaN;
@@ -437,6 +447,125 @@ function renderCharts(observations, forecast, rec, source) {
   podsChart = upsertChart(podsChart, "pods-chart", labels, podsDatasets, baseChartOptions("pods", true));
 }
 
+// ---------- learning ----------
+
+function formatDays(days) {
+  if (days < 1) return formatDuration(days * 86400);
+  const rounded = days < 10 ? days.toFixed(1) : Math.round(days).toString();
+  return `${rounded} day${rounded === "1.0" ? "" : "s"}`;
+}
+
+function learningStage(learning) {
+  const days = learning.history_days;
+  if (!learning.knows_daily_pattern) {
+    return {
+      headline: `Learning this workload's daily pattern: ${formatDays(days)} of history so far, a day is needed.`,
+      progress: Math.min(1, days),
+    };
+  }
+  if (!learning.knows_weekly_pattern) {
+    return {
+      headline: `Knows the daily pattern from ${formatDays(days)} of history. The weekly pattern needs 7 days.`,
+      progress: Math.min(1, days / 7),
+    };
+  }
+  return {
+    headline: `Knows the daily and weekly pattern from ${formatDays(days)} of history.`,
+    // Accuracy keeps improving until about three weeks of history.
+    progress: days < 21 ? days / 21 : null,
+  };
+}
+
+function learningAccuracy(learning) {
+  const accuracy = learning.accuracy;
+  if (!learning.knows_daily_pattern) {
+    return "Until then, scaling uses the last few minutes of demand only.";
+  }
+  if (!accuracy.scored_minutes) {
+    return "Its accuracy appears here once its first forecasts can be checked against what happened, within the hour.";
+  }
+  const pct = (value) => `${(value * 100).toFixed(1)}%`;
+  const checked =
+    accuracy.scored_minutes < 1440
+      ? `Over the ${formatDuration(accuracy.scored_minutes * 60)} checked so far`
+      : "Over the last week";
+  let text = `${checked}, its forecasts have been off by ${pct(accuracy.model_error)} on average, against ${pct(accuracy.baseline_error)} for assuming nothing changes. The busy-case line covered ${pct(accuracy.p90_coverage)} of what happened.`;
+  const days = accuracy.daily_model_error;
+  if (days.length >= 2) {
+    text += ` Daily error: ${pct(days[0].error)} on ${days[0].day}, ${pct(days[days.length - 1].error)} on ${days[days.length - 1].day}.`;
+  }
+  return text;
+}
+
+function renderLearning(learning, source) {
+  const stage = learningStage(learning);
+  setText("learning-headline", stage.headline);
+  const progress = document.getElementById("learning-progress");
+  progress.hidden = stage.progress === null;
+  document.getElementById("learning-progress-fill").style.width = `${Math.round((stage.progress || 0) * 100)}%`;
+  setText(
+    "learning-note",
+    learning.trained_at
+      ? `trained ${formatDuration(ageSeconds(learning.trained_at))} ago, retrains every ${formatDuration(learning.retrain_minutes * 60)}`
+      : `retrains every ${formatDuration(learning.retrain_minutes * 60)}`
+  );
+  setText("learning-accuracy", learningAccuracy(learning));
+  setText(
+    "learning-footnote",
+    source && source.demo_history_days
+      ? `Demo: the first ${source.demo_history_days} days of this history were generated when the demo started, so the model has weeks to learn from; everything since is live.`
+      : ""
+  );
+  renderDayChart(learning);
+}
+
+function renderDayChart(learning) {
+  const signal = DEMAND_SIGNALS[learning.demand_signal] || DEMAND_SIGNALS.request_rate;
+  const history = learning.history;
+  const forecast = learning.forecast;
+  const horizon = forecast ? forecast.p50.length : 0;
+  const clock = (date) => date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const labels = history.minutes.map((m) => clock(parseTs(m)));
+  if (forecast) {
+    const start = parseTs(forecast.start).getTime();
+    for (let i = 0; i < horizon; i++) labels.push(clock(new Date(start + i * 60000)));
+  }
+  const pad = (n) => new Array(Math.max(n, 0)).fill(null);
+  const last = history.values.length ? history.values[history.values.length - 1] : null;
+  const future = (values) => [...pad(history.values.length - 1), last, ...values];
+  const blue = themeColor("--blue");
+  const orange = themeColor("--orange");
+  const datasets = [line("observed", [...history.values, ...pad(horizon)], blue)];
+  if (forecast) {
+    datasets.push(
+      line("likely range", future(forecast.p90), "transparent", {
+        backgroundColor: "rgba(106, 174, 224, 0.22)",
+        fill: "+1",
+        borderWidth: 0,
+      }),
+      line("_low", future(forecast.p10), "transparent", { borderWidth: 0 }),
+      line("expected", future(forecast.p50), blue, { borderDash: [5, 4] }),
+      line("busy case", future(forecast.p90), orange)
+    );
+  }
+  const options = baseChartOptions(signal.unit, false);
+  options.scales.x.ticks.maxTicksLimit = window.innerWidth < 640 ? 4 : 12;
+  dayChart = upsertChart(dayChart, "day-chart", labels, datasets, options);
+}
+
+async function refreshLearning() {
+  if (!currentWorkload) return;
+  const workload = currentWorkload;
+  try {
+    const learning = await fetchJson(`/api/workloads/${encodeURIComponent(workload)}/learning`);
+    if (workload !== currentWorkload) return;
+    renderLearning(learning, lastSource);
+  } catch (err) {
+    if (workload !== currentWorkload) return;
+    setText("learning-headline", `Could not load what it has learned: ${err.message}`);
+  }
+}
+
 // ---------- engineering details ----------
 
 function renderMetrics(latest) {
@@ -543,6 +672,7 @@ function renderLog(observations) {
 // ---------- source (top bar) ----------
 
 function renderSource(source) {
+  lastSource = source;
   sourceMode = source.mode;
   actuationModel = source.actuation_model;
   updateTriggerButtons();
@@ -792,9 +922,12 @@ async function loadWorkloads() {
     selectedModel = actuationModel;
     clearReplayResults();
     refresh();
+    refreshLearning();
   });
   await refresh();
+  refreshLearning();
   setInterval(refresh, POLL_INTERVAL_MS);
+  setInterval(refreshLearning, LEARNING_POLL_INTERVAL_MS);
 }
 
 Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;

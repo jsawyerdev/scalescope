@@ -176,6 +176,9 @@ select, .button {
 .footnote { margin-top: 10px; color: var(--muted); font-size: 12px; }
 
 .chart-wrap { position: relative; height: 280px; }
+.learning-headline { font-size: 17px; color: var(--blue); margin: 2px 0 6px; }
+.progress { height: 6px; background: var(--blue-light); margin: 4px 0 10px; max-width: 420px; }
+.progress span { display: block; height: 100%; background: var(--blue); }
 .chart-wrap.small { height: 150px; }
 
 .try-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }

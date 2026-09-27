@@ -78,6 +78,7 @@ def test_forecasting_ahead_beats_reacting_to_a_step_in_demand() -> None:
         history_steps=len(demand),
         hpa_stabilization_ticks=150,
         scale_down_stabilization_ticks=0,
+        lead_steps=15,
     )
 
     assert result is not None
@@ -103,6 +104,7 @@ def _replay(frame: pl.DataFrame, capacity: PodCapacity, demand: np.ndarray) -> o
         history_steps=100,
         hpa_stabilization_ticks=150,
         scale_down_stabilization_ticks=0,
+        lead_steps=15,
     )
 
 

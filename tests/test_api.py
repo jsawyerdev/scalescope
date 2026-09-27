@@ -477,3 +477,69 @@ def test_scaling_replay_explains_when_it_cannot_run(
 
     assert body["outcomes"] == []
     assert body["reason"]
+
+
+def test_recommendation_without_long_memory_is_not_anticipated(
+    client: TestClient, store: Store
+) -> None:
+    workload = _workload_name()
+    seed_observations(store, workload, 40)
+
+    rec = client.get(f"/api/workloads/{workload}/recommendation").json()
+
+    assert rec["anticipated"] is False
+    assert rec["long_term_peak_p90"] is None
+
+
+def test_learning_reports_progress_before_a_day_of_history(
+    client: TestClient, store: Store
+) -> None:
+    workload = _workload_name()
+    seed_observations(store, workload, 40)
+
+    learning = client.get(f"/api/workloads/{workload}/learning").json()
+
+    assert learning["knows_daily_pattern"] is False
+    assert learning["forecast"] is None
+    assert learning["accuracy"]["scored_minutes"] == 0
+    assert learning["retrain_minutes"] > 0
+
+
+def test_learning_serves_the_day_and_the_forecast_once_trained(
+    client: TestClient, store: Store
+) -> None:
+    import polars as pl
+
+    from scalescope.config import settings
+    from scalescope.learning import Learner
+
+    workload = _workload_name()
+    seed_observations(store, workload, 40)
+    now = datetime.now(UTC)
+    last = now.replace(second=0, microsecond=0, tzinfo=None) - timedelta(minutes=1)
+    minutes = [last - timedelta(minutes=i) for i in range(3 * 1440)][::-1]
+    hour = pl.Series([m.hour + m.minute / 60 for m in minutes])
+    demand = 500 + 400 * ((hour - 12) / 12) ** 2
+    store.insert_minutes(
+        pl.DataFrame(
+            {
+                "workload": [workload] * len(minutes),
+                "minute": minutes,
+                "samples": [30] * len(minutes),
+                "request_rate": demand,
+                "cpu_usage_millicores": demand,
+                "replicas": [8.0] * len(minutes),
+                "latency_p95_ms": [30.0] * len(minutes),
+            }
+        )
+    )
+    learner = cast(Learner, app_state["learner"])
+    assert learner.retrain(workload, "request_rate", now) is not None
+
+    learning = client.get(f"/api/workloads/{workload}/learning").json()
+
+    assert learning["knows_daily_pattern"] is True
+    assert learning["knows_weekly_pattern"] is False
+    assert learning["history_days"] == pytest.approx(3, abs=0.01)
+    assert len(learning["history"]["values"]) >= 6 * 60 - 1
+    assert len(learning["forecast"]["p90"]) == settings.long_horizon_minutes

@@ -4,6 +4,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.16.0]
+
+### Added
+
+- **Long-memory forecasting.** Each workload's demand is rolled up into
+  minute history kept for `SCALESCOPE_HISTORY_RETENTION_DAYS` (35), and a
+  LightGBM quantile model (`scalescope.models.seasonal`) learns its daily
+  and weekly pattern from up to 28 days of it, retrained every
+  `SCALESCOPE_RETRAIN_MINUTES` (15), forecasting the next
+  `SCALESCOPE_LONG_HORIZON_MINUTES` (60). It improves with monitoring time:
+  on realistic synthetic traffic, next-hour error falls from 9.2% with a
+  day of history to 5.9% with three weeks, against 11.1% for assuming
+  nothing changes (`scripts/eval_long_memory.py`).
+- **Scaling ahead of the pattern.** `SCALESCOPE_POD_STARTUP_SECONDS` (30)
+  sets how far ahead pods are started. Scale-ups cover the busiest minute
+  either forecast expects within that time; pods the long-memory forecast
+  needs back within twice that time are kept. Recommendations report
+  `anticipated` when the learned pattern changed the decision.
+- **Live accuracy.** Every long-memory forecast is logged and scored against
+  what then happened, next to a "same as now" baseline, over the last week.
+- **"What it has learned"** dashboard panel and
+  `GET /api/workloads/{name}/learning`: history, whether the daily and
+  weekly patterns are known, live accuracy, and the last six hours with the
+  next hour's forecast.
+- The latency curve is refitted on weeks of minute history, covering quiet
+  and busy periods, once a day of it exists.
+- DEMO mode generates 21 days of history at first start (labelled as such
+  in the dashboard) and its simulated traffic follows the same daily and
+  weekly shape.
+- README: who ScaleScope is for, what it does, and how it learns.
+
+### Changed
+
+- `/healthz` fails when either background loop (data source or history)
+  has stopped.
+- The pod startup lead is `SCALESCOPE_POD_STARTUP_SECONDS` instead of a
+  fixed 15 ticks; the default reproduces it at the default 2s tick.
+
 ## [0.15.1]
 
 ### Changed

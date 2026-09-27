@@ -35,7 +35,7 @@ counts. It changes a Deployment only when you turn on actuation (step 5).
 Straight from GitHub, no clone needed:
 
 ```sh
-kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.15.1"
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.16.0"
 kubectl -n scalescope-system rollout status deployment/scalescope
 ```
 
@@ -59,7 +59,11 @@ Open http://localhost:8000 and pick a workload. From the top:
    pods would not fix the problem.
 2. **Recommendation**: what the autoscaler would do ("Add 1 pod now: 4 → 5"),
    why, and the numbers behind it. It stays advisory until step 5.
-3. **Demand forecast and pods**: recent demand, the forecast, and pods
+3. **What it has learned**: how much history it has for this workload
+   (a day for the daily pattern, a week for the weekly one), how accurate
+   its forecasts have been against assuming nothing changes, and the last
+   6 hours with the next hour's forecast.
+4. **Demand forecast and pods**: recent demand, the forecast, and pods
    running vs needed.
 
 Give each workload a few minutes of history. When demand is a request rate,
@@ -98,6 +102,7 @@ kubectl -n scalescope-system set env deployment/scalescope \
 | `SCALESCOPE_PROMETHEUS_URL` | Read per-pod request rate (used as demand, sharper than CPU), p95 latency (used to size pods), CPU throttling, and error rate. Each query must return series labelled `namespace` and `pod`. The defaults assume `http_requests_total` with a `code` label and an `http_request_duration_seconds` histogram, plus cAdvisor for throttling; change `SCALESCOPE_PROMETHEUS_RPS_QUERY`, `_LATENCY_QUERY`, `_ERROR_RATE_QUERY`, or `_THROTTLING_QUERY` to match your metric names, or set one empty to skip it. |
 | `SCALESCOPE_LATENCY_SLO_MS` | The p95 latency (ms) pods are sized to keep. Unset, twice the workload's own no-load latency. |
 | `SCALESCOPE_CAPACITY_PER_POD_RPS` | Requests/s one pod serves at 100% of its CPU request, from a load test. Overrides the measured capacity. |
+| `SCALESCOPE_POD_STARTUP_SECONDS` | How long a new pod takes to serve traffic (default 30), including a new node if the cluster autoscaler must add one. Set it to what you actually see: ScaleScope starts pods this far ahead of the forecast need, which is where it beats a reactive autoscaler. |
 | `SCALESCOPE_MIN_REPLICAS`, `SCALESCOPE_MAX_REPLICAS` | Bounds on every recommendation (default 1 and 30). |
 | `SCALESCOPE_TARGET_UTILIZATION` | How full each pod may run (default 0.70). |
 | `SCALESCOPE_K8S_NAMESPACES` | Comma-separated namespaces to observe; `*` (the default in the manifest) means all readable ones. |
@@ -178,7 +183,7 @@ exposes request-rate, latency, and error metrics, so you can watch every
 part of ScaleScope work.
 
 ```sh
-kubectl apply -k "https://github.com/jsawyerdev/scalescope//sample-workload/k8s?ref=v0.15.1"
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//sample-workload/k8s?ref=v0.16.0"
 
 # give ScaleScope the sample's own metrics (request rate, latency, errors)
 kubectl -n scalescope-system set env deployment/scalescope \
@@ -231,7 +236,7 @@ kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v
 Uninstall (this also deletes the namespace and its history volume):
 
 ```sh
-kubectl delete -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.15.1"
+kubectl delete -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.16.0"
 kubectl delete -f k8s/scalescope-actuation/ --ignore-not-found
 ```
 
@@ -244,8 +249,10 @@ kubectl delete -f k8s/scalescope-actuation/ --ignore-not-found
 | A workload is missing from the list | It is outside `SCALESCOPE_K8S_NAMESPACES` or the ServiceAccount's RBAC. |
 | "Hold at N pods: how much one pod can handle is not known yet" | No CPU request on the Deployment and no request-rate history to measure from. Add a CPU request, or set `SCALESCOPE_CAPACITY_PER_POD_RPS`. |
 | Capacity never comes from the latency curve | No latency per pod (Prometheus latency query returns nothing: check the metric name), or the workload has only run in a narrow band of load per pod, so the curve's bend is not visible. ScaleScope then sizes from CPU. |
+| "Learning this workload's daily pattern" | Normal for the first day: the long-memory forecast starts after a day of history, and the weekly pattern after a week. Until then scaling uses the short-term forecast. History survives restarts (it is on the volume). |
+| The volume fills up | Minute history takes about 7 MB per workload at the default 35 days; raw observations are kept 24 hours. Lower `SCALESCOPE_HISTORY_RETENTION_DAYS` or give the PVC more space. |
 | Scaling replay says "not enough history yet" | It needs about 90 observations (a third to measure capacity, the rest to replay). |
 | Demand stays at 0 | metrics-server is missing or cannot be read (logs say `metrics.k8s.io unavailable`); `kubectl top pods` must work. |
 | "Scaling will not fix this" | The diagnosis found a cause more pods would not solve (CPU throttling, a probable memory leak, pods stuck pending). The status line says which. |
 | Autoscaling shows "refusing to write" | A HorizontalPodAutoscaler targets the Deployment. Delete it or turn actuation off. |
-| `ImagePullBackOff` | The cluster cannot reach `ghcr.io`; mirror the image to a reachable registry and set it with a kustomize overlay (`kustomize edit set image ghcr.io/jsawyerdev/scalescope=<your-registry>/scalescope:0.15.1`). |
+| `ImagePullBackOff` | The cluster cannot reach `ghcr.io`; mirror the image to a reachable registry and set it with a kustomize overlay (`kustomize edit set image ghcr.io/jsawyerdev/scalescope=<your-registry>/scalescope:0.16.0`). |

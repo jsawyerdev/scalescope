@@ -4,6 +4,7 @@ import asyncio
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fastapi import FastAPI
@@ -30,6 +31,9 @@ def test_lifespan_awaits_background_task_before_closing_store(
         finally:
             events.append("task_cancelled")
 
+    async def fake_history_loop(store: FakeStore, learner: object) -> None:
+        await asyncio.Future()
+
     async def run_lifespan() -> None:
         async with main.lifespan(FastAPI()):
             await asyncio.sleep(0)
@@ -37,6 +41,8 @@ def test_lifespan_awaits_background_task_before_closing_store(
     monkeypatch.setattr(main, "settings", replace(main.settings, mode="demo"))
     monkeypatch.setattr(main, "Store", FakeStore)
     monkeypatch.setattr(main, "_simulation_loop", fake_simulation_loop)
+    monkeypatch.setattr(main, "_history_loop", fake_history_loop)
+    monkeypatch.setattr(main.demo_history, "backfill", lambda *args: 0)
     try:
         asyncio.run(run_lifespan())
     finally:
@@ -52,6 +58,7 @@ def test_observe_loop_stores_rows_and_reports_partial_failures(
     from datetime import UTC, datetime
 
     from scalescope.k8s_collector import CollectionResult, KubernetesWorkloadTarget
+    from scalescope.learning import Learner
     from scalescope.storage import Store
 
     target = KubernetesWorkloadTarget(namespace="payments", deployment="api")
@@ -94,7 +101,9 @@ def test_observe_loop_stores_rows_and_reports_partial_failures(
     main.app_state["source"] = main._init_source_state()
 
     async def one_tick() -> None:
-        task = asyncio.create_task(main._observe_loop(store))
+        task = asyncio.create_task(
+            main._observe_loop(store, Learner(store, horizon_minutes=60))
+        )
         while not main.app_state["source"]["connected"]:
             await asyncio.sleep(0.01)
         task.cancel()
@@ -114,19 +123,65 @@ def test_observe_loop_stores_rows_and_reports_partial_failures(
 
 
 @pytest.mark.parametrize(
-    ("task_done", "status_code"), [(None, 200), (False, 200), (True, 503)]
+    ("done", "status_code"),
+    [([], 200), ([False, False], 200), ([False, True], 503)],
 )
-def test_healthz_fails_once_the_data_source_task_stops(
-    monkeypatch: pytest.MonkeyPatch, task_done: bool | None, status_code: int
+def test_healthz_fails_once_a_background_task_stops(
+    monkeypatch: pytest.MonkeyPatch, done: list[bool], status_code: int
 ) -> None:
     from types import SimpleNamespace
 
     from fastapi.testclient import TestClient
 
-    if task_done is None:
-        monkeypatch.delitem(main.app_state, "data_source_task", raising=False)
-    else:
-        task = SimpleNamespace(done=lambda: task_done)
-        monkeypatch.setitem(main.app_state, "data_source_task", task)
+    tasks = [
+        SimpleNamespace(done=lambda d=d: d, get_name=lambda i=i: f"task {i}")
+        for i, d in enumerate(done)
+    ]
+    monkeypatch.setitem(main.app_state, "background_tasks", tasks)
 
-    assert TestClient(main.app).get("/healthz").status_code == status_code
+    response = TestClient(main.app).get("/healthz")
+
+    assert response.status_code == status_code
+    if status_code == 503:
+        assert response.json() == {"status": "task 1 stopped"}
+
+
+def test_one_workloads_training_failure_does_not_stop_the_others(
+    tmp_path: Path,
+) -> None:
+    from datetime import UTC, datetime
+
+    from scalescope.learning import Learner
+    from scalescope.storage import Store
+
+    store = Store(str(tmp_path / "retrain.duckdb"))
+    for workload in ("broken", "healthy"):
+        store.insert_observation(
+            {
+                "ts": datetime.now(UTC),
+                "workload": workload,
+                "replicas": 2,
+                "desired_replicas": 2,
+                "request_rate": 10.0,
+                "cpu_usage_pct": 50.0,
+                "cpu_usage_millicores": 500.0,
+                "cpu_request_millicores": 1000.0,
+                "cpu_throttled_pct": 0.0,
+                "memory_usage_mb": 10.0,
+                "latency_p95_ms": 0.0,
+                "error_rate": 0.0,
+                "pending_pods": 0,
+                "restarts": 0,
+            }
+        )
+    trained: list[str] = []
+
+    class FlakyLearner:
+        def retrain(self, workload: str, signal: str, now: datetime) -> None:
+            if workload == "broken":
+                raise ValueError("bad history")
+            trained.append(workload)
+
+    main._retrain_all(store, cast(Learner, FlakyLearner()))
+
+    assert trained == ["healthy"]

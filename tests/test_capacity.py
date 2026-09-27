@@ -258,3 +258,68 @@ def test_recommendation_uses_the_latency_model_utilization() -> None:
     # 1100 req/s at 110 req/s per pod (220 * 0.5) -> 10 pods.
     rec = recommend_replicas(8, _forecast([1100.0 / 1.2] * 10), latency_sized, _POLICY)
     assert rec.pods_needed == [10] * 10
+
+
+def _long(values: list[float]) -> Forecast:
+    return _forecast(values)
+
+
+def test_long_forecast_scales_up_for_a_rise_within_the_startup_time() -> None:
+    # Short term: flat 800 fits in 8 pods. The long-memory forecast sees
+    # the usual rise to 1600 in the next minute: pods start now.
+    rec = recommend_replicas(
+        8,
+        _forecast([800.0] * 10),
+        _CAPACITY,
+        _POLICY,
+        9,
+        long_forecast=_long([1600.0, 1600.0, 800.0]),
+        lead_minutes=1,
+    )
+    assert rec.recommended_replicas > 8
+    assert rec.anticipated
+
+
+def test_long_forecast_beyond_the_startup_time_changes_nothing_yet() -> None:
+    short = _forecast([800.0] * 10)
+    rec = recommend_replicas(
+        8,
+        short,
+        _CAPACITY,
+        _POLICY,
+        9,
+        long_forecast=_long([800.0, 800.0, 800.0, 1600.0]),
+        lead_minutes=1,
+    )
+    without = recommend_replicas(8, short, _CAPACITY, _POLICY, 9)
+    assert rec.recommended_replicas == without.recommended_replicas
+    assert not rec.anticipated
+
+
+def test_long_forecast_keeps_pods_needed_again_within_twice_the_startup_time() -> None:
+    # Short term alone would release pods; demand returns in minute 2.
+    short = _forecast([200.0] * 10)
+    without = recommend_replicas(8, short, _CAPACITY, _POLICY, 9)
+    held = recommend_replicas(
+        8,
+        short,
+        _CAPACITY,
+        _POLICY,
+        9,
+        long_forecast=_long([200.0, 1000.0, 200.0]),
+        lead_minutes=1,
+    )
+    released = recommend_replicas(
+        8,
+        short,
+        _CAPACITY,
+        _POLICY,
+        9,
+        long_forecast=_long([200.0, 200.0, 1000.0]),
+        lead_minutes=1,
+    )
+
+    assert without.recommended_replicas < 8
+    assert held.recommended_replicas == 8 and held.anticipated
+    assert released.recommended_replicas == without.recommended_replicas
+    assert not released.anticipated

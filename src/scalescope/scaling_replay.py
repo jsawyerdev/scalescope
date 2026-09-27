@@ -26,7 +26,6 @@ from dataclasses import dataclass
 import polars as pl
 
 from scalescope.capacity import (
-    STARTUP_LEAD_STEPS,
     PodCapacity,
     ScaleDownStabilizer,
     ScalingPolicy,
@@ -98,6 +97,7 @@ def replay_scaling(
     history_steps: int,
     hpa_stabilization_ticks: int,
     scale_down_stabilization_ticks: int,
+    lead_steps: int,
 ) -> ScalingReplay | None:
     """Both policies over the last two thirds of `observations`, or None if too short.
 
@@ -119,8 +119,8 @@ def replay_scaling(
 
     initial = bounded(int(replicas[start]))
     clusters = {
-        "ScaleScope": _Cluster(initial, STARTUP_LEAD_STEPS),
-        "Reactive HPA": _Cluster(initial, STARTUP_LEAD_STEPS),
+        "ScaleScope": _Cluster(initial, lead_steps),
+        "Reactive HPA": _Cluster(initial, lead_steps),
     }
     scalescope_stabilizer = ScaleDownStabilizer(scale_down_stabilization_ticks)
     hpa_stabilizer = ScaleDownStabilizer(hpa_stabilization_ticks)
@@ -140,7 +140,7 @@ def replay_scaling(
                 forecast,
                 capacity,
                 policy,
-                peak_step=STARTUP_LEAD_STEPS,
+                peak_step=lead_steps,
                 scaling_will_help=diagnose(
                     observations.slice(first, tick - first),
                     max_replicas=policy.max_replicas,

@@ -12,6 +12,7 @@ from scalescope import main
 from scalescope.capacity import ScaleDownStabilizer
 from scalescope.k8s_actuator import KubernetesActuator
 from scalescope.k8s_collector import KubernetesWorkloadTarget
+from scalescope.learning import Learner
 from scalescope.storage import Store
 
 _TARGET = KubernetesWorkloadTarget(namespace="payments", deployment="api")
@@ -62,7 +63,11 @@ def test_actuation_sizes_cpu_demand_against_the_cpu_request(store: Store) -> Non
     actuator = _RecordingActuator()
 
     main._actuate(
-        store, cast(KubernetesActuator, actuator), _TARGET, ScaleDownStabilizer(0)
+        store,
+        Learner(store, horizon_minutes=60),
+        cast(KubernetesActuator, actuator),
+        _TARGET,
+        ScaleDownStabilizer(0),
     )
 
     assert actuator.writes == [("api", 3)]
@@ -79,7 +84,11 @@ def test_actuation_plans_from_desired_not_lagging_status_replicas(
     actuator = _RecordingActuator()
 
     main._actuate(
-        store, cast(KubernetesActuator, actuator), _TARGET, ScaleDownStabilizer(0)
+        store,
+        Learner(store, horizon_minutes=60),
+        cast(KubernetesActuator, actuator),
+        _TARGET,
+        ScaleDownStabilizer(0),
     )
 
     assert actuator.writes == [("api", 10)]
