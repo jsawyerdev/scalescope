@@ -117,7 +117,7 @@ echo "== recording resolved versions -> $LOCK_FILE =="
 pip freeze --exclude-editable > "$LOCK_FILE"
 
 echo "== formatting =="
-black src tests sample-workload/app scripts/tune
+black src tests sample-workload/app scripts
 
 echo "== lint =="
 ruff check .

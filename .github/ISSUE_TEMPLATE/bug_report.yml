@@ -1,0 +1,44 @@
+name: Bug report
+description: Something ScaleScope does is wrong or broken.
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: Steps, commands, or API calls. A DEMO-mode reproduction is ideal.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: ScaleScope version
+      description: Shown in the dashboard footer and by `curl /api/source`.
+      placeholder: "0.15.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options: [demo, observe, observe with actuation]
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Kubernetes version and distribution, metrics-server, Prometheus (if used), how ScaleScope was installed.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "`kubectl -n scalescope-system logs deploy/scalescope`. Remove anything sensitive (cluster addresses, tokens) first."
+      render: text

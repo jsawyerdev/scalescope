@@ -1,16 +1,22 @@
 # ScaleScope
 
+[![CI](https://github.com/jsawyerdev/scalescope/actions/workflows/ci.yml/badge.svg)](https://github.com/jsawyerdev/scalescope/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/jsawyerdev/scalescope/actions/workflows/codeql.yml/badge.svg)](https://github.com/jsawyerdev/scalescope/actions/workflows/codeql.yml)
+[![Release](https://img.shields.io/github/v/release/jsawyerdev/scalescope)](https://github.com/jsawyerdev/scalescope/releases)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+
 Explainable predictive Kubernetes capacity intelligence lab. Forecasts near-term
 demand for a workload, computes the replica count required to satisfy it, and
 runs that alongside a deterministic diagnosis engine that flags when scaling is
 the wrong response (CPU limit throttling, memory leak, node capacity exhaustion,
 HPA ceiling, non-CPU bottleneck).
 
-## Status: v0.14.1 (sizes pods from each workload's own latency curve, a queueing model fitted from its history; replays scaling decisions against a reactive HPA; throttling, latency, and errors for every workload from Prometheus)
+## Status: v0.15.0 (sizes pods from each workload's own latency curve, a queueing model fitted from its history; replays scaling decisions against a reactive HPA; throttling, latency, and errors for every workload from Prometheus)
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed at each version.
 
-Created by James Sawyer.
+Created by James Sawyer. Open source under the [Apache License 2.0](LICENSE);
+contributions are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ScaleScope is a working lab with two supported runtime modes:
 
@@ -57,7 +63,7 @@ Requirements: metrics-server (most managed clusters ship it), and CPU
 requests on the Deployments you want recommendations for.
 
 ```
-kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.14.1"
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.15.0"
 kubectl -n scalescope-system port-forward svc/scalescope 8000:80
 ```
 
@@ -848,13 +854,23 @@ triggers require that variable to be set.
 
 ```
 python3.14 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-uvicorn scalescope.main:app --reload
+pip install -r requirements-lock.txt && pip install --no-deps -e .
+SCALESCOPE_DB_PATH=./scalescope.duckdb uvicorn scalescope.main:app --reload
 pytest
 mypy
-black src tests sample-workload/app scripts/tune
+black src tests sample-workload/app scripts
 ruff check .
 ```
+
+[CONTRIBUTING.md](CONTRIBUTING.md) has the full set of checks CI runs, the
+project layout, and how releases are made.
+
+## Contributing, security, and conduct
+
+- [CONTRIBUTING.md](CONTRIBUTING.md): setting up, checks, and pull requests.
+- [SECURITY.md](SECURITY.md): report vulnerabilities privately, and what
+  ScaleScope's trust boundaries are.
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md): the Contributor Covenant 2.1.
 
 ## License
 
