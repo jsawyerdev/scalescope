@@ -245,11 +245,11 @@ kubectl delete -f k8s/scalescope-actuation/ --ignore-not-found
 | You see | Cause and fix |
 |---|---|
 | Red status "Not receiving data from the cluster" | The ServiceAccount cannot list Deployments; check the ClusterRoleBinding (or RoleBindings) and `kubectl -n scalescope-system logs deploy/scalescope`. |
-| The pod keeps restarting; `/healthz` returns 503 | The data-source loop stopped, most often because the Kubernetes client could not be created at startup. `kubectl -n scalescope-system logs deploy/scalescope --previous` shows why. |
+| The pod keeps restarting; `/healthz` returns 503 | The response names what stopped: the data-source loop or the history loop. Most often it is the data source, because the Kubernetes client could not be created at startup. `kubectl -n scalescope-system logs deploy/scalescope --previous` shows why. |
 | A workload is missing from the list | It is outside `SCALESCOPE_K8S_NAMESPACES` or the ServiceAccount's RBAC. |
-| "Hold at N pods: how much one pod can handle is not known yet" | No CPU request on the Deployment and no request-rate history to measure from. Add a CPU request, or set `SCALESCOPE_CAPACITY_PER_POD_RPS`. |
+| "Hold at N pods", with "How much one pod can handle is not known yet" | No CPU request on the Deployment and no request-rate history to measure from. Add a CPU request, or set `SCALESCOPE_CAPACITY_PER_POD_RPS`. |
 | Capacity never comes from the latency curve | No latency per pod (Prometheus latency query returns nothing: check the metric name), or the workload has only run in a narrow band of load per pod, so the curve's bend is not visible. ScaleScope then sizes from CPU. |
-| "Learning this workload's daily pattern" | Normal for the first day: the long-memory forecast starts after a day of history, and the weekly pattern after a week. Until then scaling uses the short-term forecast. History survives restarts (it is on the volume). |
+| "Learning the daily pattern" | Normal for the first day: the long-memory forecast starts after a day of history, and the weekly pattern after a week. Until then scaling uses the short-term forecast. History survives restarts (it is on the volume). |
 | The volume fills up | Minute history takes about 7 MB per workload at the default 35 days; raw observations are kept 24 hours. Lower `SCALESCOPE_HISTORY_RETENTION_DAYS` or give the PVC more space. |
 | Scaling replay says "not enough history yet" | It needs about 90 observations (a third to measure capacity, the rest to replay). |
 | Demand stays at 0 | metrics-server is missing or cannot be read (logs say `metrics.k8s.io unavailable`); `kubectl top pods` must work. |
