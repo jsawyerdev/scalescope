@@ -39,7 +39,10 @@ anything to learn; or clusters without metrics-server.
    ahead, and pods kept only while the forecast needs them back soon.
 5. **Diagnoses** when more pods will not help (CPU limits, a probable memory
    leak, no room on the nodes) and holds instead.
-6. **Proves it** on your own data: the dashboard shows the model's live
+6. **Forecasts nodes**: how many nodes each node pool needs over the next
+   hour, from what its pods will request, and how many node-hours ran idle
+   (see "Pods, nodes, and cost"). Read-only: it never adds or removes nodes.
+7. **Proves it** on your own data: the dashboard shows the models' live
    accuracy, and a replay compares its decisions with a standard HPA's.
 
 ## Status
@@ -179,7 +182,7 @@ queue, or cloud service. What it depends on:
 
 | Dependency | Required? | Without it |
 |---|---|---|
-| Kubernetes API | Yes | Nothing to observe |
+| Kubernetes API | Yes | Nothing to observe. Reading nodes (for node forecasts) needs the cluster-wide install; a namespace-scoped one sees no nodes and the Nodes panel says so |
 | [metrics-server](https://github.com/kubernetes-sigs/metrics-server) | Yes, in practice (most managed clusters ship it) | No CPU or memory figures, so no forecast from CPU |
 | CPU requests on your Deployments | For CPU-based sizing | Pod capacity is unknown, and the recommendation holds the current pod count |
 | Prometheus | Optional | Request rate, latency, and errors come only from one workload's own `/metrics` (`SCALESCOPE_K8S_METRICS_URL`); throttling reads `0.0` |
@@ -190,7 +193,7 @@ ScaleScope does not run a Prometheus server of its own. It reads one you
 already have, one instant query per signal per tick.
 
 ```
-kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.16.1"
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.17.0"
 kubectl -n scalescope-system port-forward svc/scalescope 8000:80
 ```
 
@@ -258,6 +261,19 @@ shows the last six hours and the next hour: expected, likely range, and the
 busy case pods are sized for. In DEMO mode the first 21 days of history are
 generated at startup, and the panel says so.
 
+### Nodes
+
+![The Nodes panel: six nodes running where the pods' requests fit on four,
+after a traffic spike, and the next hour's busy case needing four](docs/screenshots/nodes.png)
+
+The node pool the selected workload runs on: nodes running, nodes the pods'
+requests need, and the busy-case forecast for the next hour (see "Node
+forecasts"). Here a traffic spike made the demo's simulated cluster
+autoscaler add two nodes; the spike has passed, and the pool is running two
+more nodes than its requests need until the autoscaler removes them, ten
+minutes each. The first minutes of live scoring include that spike, which
+no forecast anticipates.
+
 ### Diagnosis catching a real problem
 
 ![The status turns red: scaling will not fix a probable memory leak, so the
@@ -307,9 +323,10 @@ See [examples/README.md](examples/README.md) for copy-paste deployment paths.
 
 ## Pods, nodes, and cost
 
-ScaleScope changes **pod counts only**. It does not add or remove nodes, and
-its permissions do not let it read them. Nodes are what you pay for, so the
-cost saving depends on something that manages nodes: the Kubernetes
+ScaleScope changes **pod counts only**. It reads nodes, and forecasts what
+each node pool will need (below), but never adds or removes them. Nodes are
+what you pay for, so the cost saving depends on something that manages
+nodes: the Kubernetes
 [cluster autoscaler](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler),
 [Karpenter](https://karpenter.sh/), or your provider's managed equivalent.
 
@@ -324,6 +341,63 @@ include node start-up (typically 1 to 3 minutes) so pods are requested early
 enough for that. Pods stuck pending show on the dashboard as a node-capacity
 problem, and ScaleScope then holds the pod count rather than adding pods
 that cannot be scheduled.
+
+### Node forecasts
+
+Once a minute ScaleScope reads every node and every pod, and records per
+node pool: Ready, schedulable nodes (control-plane and cordoned nodes
+excluded), what they can allocate, what the pods on them request (pending
+pods included), what DaemonSet pods take on every node, and how long each
+new node took from creation to Ready. Pools come from the usual managed
+cluster labels (Karpenter, EKS, GKE, AKS, DigitalOcean), or
+`SCALESCOPE_NODE_POOL_LABEL`.
+
+It does not forecast node CPU: like per-pod CPU, it falls when nodes are
+added. What decides how many nodes a pool needs is what its pods
+*request*, so that is what it forecasts:
+
+```
+requested(t) = requested now
+             + sum over workloads with a learned pattern of
+               (pods(t) - pods now) x that workload's per-pod request
+```
+
+`pods(t)` follows the workload's long-memory demand forecast the way its pod
+count has followed its demand over the last week, whatever autoscaler runs
+it (an HPA, ScaleScope, or none); a workload whose pod count never changed
+adds nothing. Everything without a learned pattern, and every pod
+ScaleScope cannot see, stays at what it requests now. Nodes needed divides
+by what one node offers after its DaemonSet pods, and by how tightly this
+pool has actually packed pods: the 95th percentile of how full its nodes'
+requests have been over the last week, never below 70% (a pool that has
+only ever run mostly empty must not teach that idleness is normal). The
+dashboard's Nodes panel shows nodes running, nodes the requests need, the
+busy case (p90) over the next hour, idle node-hours over the last day, and
+the measured node start-up time.
+
+**Measured.** Three workloads with different traffic, sizes, and HPA-style
+pod counts share a pool of 4-vCPU nodes with steady other pods. From points
+every 4 hours through a final week, each workload's model trained on the 21
+days before, forecasting the next hour (three independent histories, 126
+forecasts):
+
+| | Forecast | "Same as now" |
+|---|---|---|
+| Error in the pool's requested CPU | 3.2% | 5.3% |
+| Minutes at or below the p90 line | 90% | — |
+| Busiest-minute node count: right | 68% | 55% |
+| Busiest-minute node count: too few | 11% | 44% |
+| Busiest-minute node count: one too many | 17% | 1% |
+| Busiest-minute node count: two or more too many | 4% | 0% |
+
+Assuming nothing changes misses the node the next hour needs 44% of the
+time; the forecast cuts that to 11%, at the cost of asking for one node
+more than needed 17% of the time, since it plans for the busy case.
+Re-run with `scripts/eval_node_forecast.py`.
+
+**Measured live, on your cluster.** Each forecast of a pool's requested CPU
+is logged and scored against what was then requested, next to "same as
+now", like the demand forecast.
 
 ## Architecture
 
@@ -347,6 +421,7 @@ flowchart TB
         MODELS["models/*.py<br/>naive · seasonal_naive · ewma · linear_trend<br/>auto_ets (StatsForecast) · lightgbm_quantile"]
         PERF["performance.py<br/>queueing latency model per pod"]
         LEARN["learning.py + models/seasonal.py<br/>minute history, daily/weekly<br/>LightGBM, live accuracy"]
+        NODES["nodes.py<br/>node pools: requests forecast,<br/>nodes needed, live accuracy"]
         CAPACITY["capacity.py<br/>forecast to required replicas"]
         REPLAY["scaling_replay.py<br/>ScaleScope vs reactive HPA"]
         DIAGNOSIS["diagnosis.py<br/>deterministic rule engine,<br/>never calls a model"]
@@ -363,6 +438,9 @@ flowchart TB
     STORE --> MODELS
     STORE --> LEARN
     LEARN --> CAPACITY
+    LEARN --> NODES
+    STORE --> NODES
+    NODES --> API
     STORE --> PERF
     STORE --> DIAGNOSIS
     MODELS --> CAPACITY
@@ -669,6 +747,7 @@ Environment variables (see `src/scalescope/config.py`):
 | `SCALESCOPE_LONG_HORIZON_MINUTES` | `60` | How far ahead the long-memory model forecasts; at least twice the pod startup time, at most 120 |
 | `SCALESCOPE_HISTORY_RETENTION_DAYS` | `35` | Minute history kept for the long-memory model |
 | `SCALESCOPE_RETRAIN_MINUTES` | `15` | How often each workload's long-memory model is retrained |
+| `SCALESCOPE_NODE_POOL_LABEL` | unset | Node label naming each node's pool; unset reads the Karpenter, EKS, GKE, AKS, and DigitalOcean pool labels, and anything else is pool `default` |
 | `SCALESCOPE_LIGHTGBM_CONFIG_PATH` | unset | Optional LightGBM hyperparameter JSON produced by `scripts/tune` |
 | `SCALESCOPE_K8S_NAMESPACE` | `scalescope-demo` | Primary namespace for metrics URL attachment and opt-in actuation |
 | `SCALESCOPE_K8S_DEPLOYMENT` | `sample-workload` | Primary deployment for metrics URL attachment and opt-in actuation |
@@ -785,7 +864,7 @@ environments where ScaleScope is authorized to change replica counts.
 only the selected model's forecast; the recommendations call already carries
 every model's replica decision. The "What it has learned" panel refreshes
 every `LEARNING_POLL_INTERVAL_MS` (60s), since the minute history and model
-change at most once a minute. Replay and load triggers are explicit button
+change at most once a minute; so does the Nodes panel. Replay and load triggers are explicit button
 actions, never polled. Chart.js is vendored under `static/vendor/`, so the
 dashboard needs no internet access:
 
@@ -801,7 +880,7 @@ sequenceDiagram
         API-->>Browser: JSON
     end
     loop every 60s
-        Browser->>API: GET /learning
+        Browser->>API: GET /learning, /nodes
         API-->>Browser: JSON
     end
     Note over Browser,API: on button click only — not polled
@@ -1032,6 +1111,10 @@ triggers require that variable to be set.
   now"), the last 6 hours of minute history, and the next hour's forecast
 - `GET /api/workloads/{name}/scaling-replay` — ScaleScope vs a reactive HPA
   over this workload's recorded demand (see "Scaling replay")
+- `GET /api/nodes` — each node pool: nodes, allocatable and requested
+  resources, nodes needed now and over the next hour (busy case), idle
+  node-hours in the last day, node start-up time, live forecast accuracy,
+  and the last 6 hours; plus which pool each workload runs on
 - `GET /api/source` — what this instance is actually observing (mode, cluster, connection status)
 - `POST /api/workloads/{name}/trigger?kind={cpu|memory|traffic|stress}&duration_seconds=45` — force a load
   pattern now (DEMO: the local simulator; OBSERVE: proxied to the real workload's own `/trigger`,
@@ -1103,7 +1186,12 @@ The bundled DejaVu Sans Mono Regular font keeps its own license in
   Deployments keep their current pod counts and no history is lost.
   Running two replicas is not supported: both would collect, and with
   actuation on, both would write.
-- **Nodes are not scaled.** ScaleScope changes pod counts; the cost saving
-  needs a node autoscaler (see "Pods, nodes, and cost").
+- **Nodes are forecast, not scaled.** ScaleScope changes pod counts; the
+  cost saving needs a node autoscaler (see "Pods, nodes, and cost").
+- **Node forecasts assume a pool's nodes are alike.** Nodes needed divides
+  by the pool's average node; a pool mixing instance sizes (Karpenter
+  picking per workload, say) gets an average, so read it as capacity to
+  provision rather than an exact node count. Pods that cannot be seen or
+  have no learned pattern are held at their current requests.
 - **Unannounced demand steps** are not forecastable; see "Scaling replay"
   for the pods-versus-shortfall tradeoff and the setting that controls it.

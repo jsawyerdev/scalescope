@@ -437,3 +437,62 @@ def test_empty_prometheus_queries_are_skipped(monkeypatch: pytest.MonkeyPatch) -
     collector.collect(("payments",))
 
     assert queried == ["rps"]
+
+
+def test_collect_names_each_workloads_node_pool_from_the_last_node_sample() -> None:
+    from datetime import UTC, datetime
+
+    collector, mock_apps, mock_core = _collector()
+    mock_core.list_node.return_value = SimpleNamespace(
+        items=[
+            SimpleNamespace(
+                metadata=SimpleNamespace(
+                    name="node-1",
+                    labels={"karpenter.sh/nodepool": "general"},
+                    creation_timestamp=None,
+                ),
+                spec=SimpleNamespace(unschedulable=False),
+                status=SimpleNamespace(
+                    allocatable={"cpu": "4", "memory": "16Gi"},
+                    conditions=[
+                        SimpleNamespace(
+                            type="Ready", status="True", last_transition_time=None
+                        )
+                    ],
+                ),
+            )
+        ]
+    )
+    pod = _pod("api-1", {"app": "api"})
+    pod.spec.node_name = "node-1"
+    pod.spec.containers[0].resources.requests["memory"] = "512Mi"
+    pod.metadata.owner_references = []
+    mock_core.list_pod_for_all_namespaces.return_value = SimpleNamespace(items=[pod])
+    deployment = _deployment("payments", "api")
+    deployment.spec.template.spec.containers[0].resources.requests["memory"] = "512Mi"
+    mock_apps.list_namespaced_deployment.return_value = SimpleNamespace(
+        items=[deployment]
+    )
+    mock_core.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
+    collector._custom.list_namespaced_custom_object.return_value = {"items": []}
+
+    before = collector.collect(("payments",)).rows[0]
+    nodes = collector.collect_nodes(datetime(2026, 1, 7, 12, 0, tzinfo=UTC))
+    after = collector.collect(("payments",)).rows[0]
+
+    assert before["node_pool"] == ""
+    assert after["node_pool"] == "general"
+    assert after["memory_request_mb"] == 512.0
+    assert nodes.pools[0]["requested_memory_mb"] == 512.0
+
+
+def test_collect_nodes_reports_missing_permission() -> None:
+    from datetime import UTC, datetime
+
+    from kubernetes.client.rest import ApiException
+
+    collector, _, mock_core = _collector()
+    mock_core.list_node.side_effect = ApiException(status=403, reason="Forbidden")
+
+    with pytest.raises(KubernetesUnavailableError, match="nodes"):
+        collector.collect_nodes(datetime(2026, 1, 7, 12, 0, tzinfo=UTC))

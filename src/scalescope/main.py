@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import polars as pl
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -37,9 +38,10 @@ from scalescope.k8s_collector import (
 from scalescope.learning import ACCURACY_DAYS, Learner
 from scalescope.logging_config import configure_logging
 from scalescope.models.registry import ACTUATION_MODEL, MODELS
+from scalescope.nodes import NodePlanner
 from scalescope.simulator import WorkloadSimulator, WorkloadState
 from scalescope.state import app_state
-from scalescope.storage import Store
+from scalescope.storage import NODE_MINUTE_COLUMNS, Store
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -51,6 +53,8 @@ _PRUNE_EVERY_TICKS = 300
 # missed run still rolls up every complete minute.
 _ROLLUP_EVERY_SECONDS = 60.0
 _ROLLUP_LOOKBACK = timedelta(hours=1)
+# Node pools are sampled once a minute.
+_NODE_EVERY_SECONDS = 60.0
 
 
 def _init_source_state() -> dict[str, Any]:
@@ -80,6 +84,8 @@ def _init_source_state() -> dict[str, Any]:
         "last_actuation_ts": None,
         "last_actuation_replicas": None,
         "last_actuation_error": None,
+        # Why node pools cannot be read, if they cannot (OBSERVE mode).
+        "nodes_error": None,
         # DEMO starts with generated history so the long-memory model has
         # weeks to learn from; the dashboard says so.
         "demo_history_days": (
@@ -97,17 +103,61 @@ async def _prune_if_due(store: Store, tick: int) -> None:
         logger.info("pruned %d observations older than %s", deleted, cutoff)
 
 
+def _record_nodes(
+    store: Store,
+    rows: list[dict[str, Any]],
+    startups: list[tuple[str, str, datetime, float]],
+) -> None:
+    if rows:
+        store.insert_node_minutes(pl.DataFrame(rows).select(NODE_MINUTE_COLUMNS))
+    store.record_node_startups(startups)
+
+
+def _node_sampler(sample: Callable[[datetime], None]) -> Callable[[], None]:
+    """Calls `sample(minute)` at most once per `_NODE_EVERY_SECONDS`."""
+    last = -_NODE_EVERY_SECONDS
+
+    def maybe_sample() -> None:
+        nonlocal last
+        if time.monotonic() - last < _NODE_EVERY_SECONDS:
+            return
+        last = time.monotonic()
+        sample(datetime.now(UTC).replace(second=0, microsecond=0))
+
+    return maybe_sample
+
+
+def _demo_node_pool(store: Store) -> demo_history.DemoNodePool:
+    """The demo pool, continuing from its recorded node count."""
+    recent = store.node_history(
+        datetime.now(UTC) - timedelta(hours=1), demo_history.DEMO_POOL
+    )
+    if recent.is_empty():
+        return demo_history.DemoNodePool()
+    return demo_history.DemoNodePool(nodes=int(recent["nodes"][-1]))
+
+
 async def _simulation_loop(store: Store) -> None:
     simulator = WorkloadSimulator(
         demand_level=lambda: demo_history.demand_level(datetime.now(UTC))
     )
     app_state["simulator"] = simulator
+    node_pool = await asyncio.to_thread(_demo_node_pool, store)
+
+    def sample_nodes(minute: datetime) -> None:
+        row, startups = node_pool.step(minute, simulator.state.replicas)
+        _record_nodes(store, [row], startups)
+
+    maybe_sample_nodes = _node_sampler(sample_nodes)
     tick = 0
     while True:
         row = simulator.step()
+        row["memory_request_mb"] = demo_history.POD_MEMORY_REQUEST_MB
+        row["node_pool"] = demo_history.DEMO_POOL
         # Store calls block on its lock, which API reads can hold; keep them
         # off the event loop so health checks never stall behind a query.
         await asyncio.to_thread(store.insert_observation, row)
+        await asyncio.to_thread(maybe_sample_nodes)
         app_state["source"]["last_success_ts"] = datetime.now(UTC)
         await _prune_if_due(store, tick)
         tick += 1
@@ -219,6 +269,7 @@ async def _observe_loop(store: Store, learner: Learner) -> None:
                 latency_p95_ms=settings.prometheus_latency_query,
                 error_rate=settings.prometheus_error_rate_query,
             ),
+            node_pool_label=settings.node_pool_label,
         )
         source["cluster_server"] = collector.cluster_server
         source["cluster_auth_type"] = collector.auth_type
@@ -244,9 +295,28 @@ async def _observe_loop(store: Store, learner: Learner) -> None:
         )
     stabilizer = ScaleDownStabilizer(settings.scale_down_stabilization_seconds)
 
+    def sample_nodes(minute: datetime) -> None:
+        # Node pools are advisory: no failure here may stop observing workloads.
+        try:
+            nodes = collector.collect_nodes(minute)
+            _record_nodes(store, nodes.pools, nodes.startups)
+        except KubernetesUnavailableError as exc:
+            if source["nodes_error"] is None:
+                logger.warning("node pools unavailable: %s", exc)
+            source["nodes_error"] = str(exc)
+            return
+        except Exception as exc:
+            logger.exception("node pool sampling failed")
+            source["nodes_error"] = f"node pool sampling failed: {exc}"
+            return
+        source["nodes_error"] = None
+
+    maybe_sample_nodes = _node_sampler(sample_nodes)
     tick = 0
     while True:
         try:
+            # Nodes first, so this tick's rows name each workload's pool.
+            await asyncio.to_thread(maybe_sample_nodes)
             result = await asyncio.to_thread(collector.collect, settings.k8s_namespaces)
             source["targets"] = _target_dicts(result.targets, metrics_urls)
             if not result.targets:
@@ -286,7 +356,7 @@ async def _observe_loop(store: Store, learner: Learner) -> None:
         await asyncio.sleep(settings.simulation_tick_seconds)
 
 
-def _retrain_all(store: Store, learner: Learner) -> None:
+def _retrain_all(store: Store, learner: Learner, planner: NodePlanner) -> None:
     now = datetime.now(UTC)
     for workload in store.workloads():
         recent = store.recent_observations(workload, settings.history_window_steps)
@@ -297,12 +367,23 @@ def _retrain_all(store: Store, learner: Learner) -> None:
         except Exception:
             # One workload's bad history must not stop the others learning.
             logger.exception("long-memory training failed for %s", workload)
+    planner.refit(now)
+    _plan_nodes(planner, log=True)
 
 
-async def _history_loop(store: Store, learner: Learner) -> None:
-    """Roll observations up into minute history, and retrain on schedule."""
+def _plan_nodes(planner: NodePlanner, log: bool = False) -> None:
+    try:
+        planner.refresh(datetime.now(UTC), log=log)
+    except Exception:
+        # Node plans are advisory; a failure must not stop the history loop.
+        logger.exception("node pool forecast failed")
+
+
+async def _history_loop(store: Store, learner: Learner, planner: NodePlanner) -> None:
+    """Roll observations up into minute history, retrain on schedule, and
+    re-plan node pools every minute."""
     await asyncio.to_thread(store.roll_up_minutes, datetime.now(UTC))
-    await asyncio.to_thread(_retrain_all, store, learner)
+    await asyncio.to_thread(_retrain_all, store, learner, planner)
     last_trained = time.monotonic()
     while True:
         await asyncio.sleep(_ROLLUP_EVERY_SECONDS)
@@ -316,8 +397,10 @@ async def _history_loop(store: Store, learner: Learner) -> None:
             store.prune_forecast_log, now - timedelta(days=ACCURACY_DAYS)
         )
         if time.monotonic() - last_trained >= settings.retrain_minutes * 60:
-            await asyncio.to_thread(_retrain_all, store, learner)
+            await asyncio.to_thread(_retrain_all, store, learner, planner)
             last_trained = time.monotonic()
+        else:
+            await asyncio.to_thread(_plan_nodes, planner)
 
 
 def _record_background_failure(task: asyncio.Task[None]) -> None:
@@ -337,8 +420,10 @@ def _record_background_failure(task: asyncio.Task[None]) -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     store = Store(settings.db_path)
     learner = Learner(store, settings.long_horizon_minutes, settings.latency_slo_ms)
+    planner = NodePlanner(store, learner, settings.long_horizon_minutes)
     app_state["store"] = store
     app_state["learner"] = learner
+    app_state["node_planner"] = planner
     app_state["source"] = _init_source_state()
 
     if settings.mode == "demo":
@@ -356,7 +441,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     tasks = [
         asyncio.create_task(source_loop, name="data source"),
-        asyncio.create_task(_history_loop(store, learner), name="history"),
+        asyncio.create_task(_history_loop(store, learner, planner), name="history"),
     ]
     for task in tasks:
         task.add_done_callback(_record_background_failure)

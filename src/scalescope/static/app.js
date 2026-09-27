@@ -1,5 +1,6 @@
 const POLL_INTERVAL_MS = 3000;
-// Minute history changes once a minute, so the learning panel polls slower.
+// Minute history and node pools change once a minute, so the learning and
+// nodes panels poll slower.
 const LEARNING_POLL_INTERVAL_MS = 60000;
 const LOG_MAX_ROWS = 40;
 // The chart shows this many forecast horizons of history, so the forecast
@@ -47,6 +48,7 @@ let triggerButtonsBusy = false;
 let demandChart = null;
 let podsChart = null;
 let dayChart = null;
+let nodesChart = null;
 let lastSource = null;
 
 const workloadSelect = document.getElementById("workload-select");
@@ -548,6 +550,165 @@ function renderDayChart(learning) {
   dayChart = upsertChart(dayChart, "day-chart", labels, datasets, options);
 }
 
+// ---------- nodes ----------
+
+function nodesPhrase(count) {
+  return `${count} node${count === 1 ? "" : "s"}`;
+}
+
+function nodesHeadline(pool) {
+  const running = `${nodesPhrase(pool.nodes)} running; the pods' requests fit on ${pool.nodes_needed_now}.`;
+  if (pool.peak_nodes_needed === null) {
+    return `${running} No workload on this pool has a learned pattern yet, so there is no forecast.`;
+  }
+  const peak = pool.peak_nodes_needed;
+  const when = pool.peak_in_minutes ? `in ${formatDuration(pool.peak_in_minutes * 60)}` : "now";
+  if (peak > pool.nodes) {
+    return `${running} The busy case needs ${nodesPhrase(peak)} ${when}: ${peak - pool.nodes} more than now.`;
+  }
+  if (peak < pool.nodes) {
+    return `${running} The next hour's busy case fits on ${nodesPhrase(peak)}: ${pool.nodes - peak} fewer than are running.`;
+  }
+  return `${running} The next hour's busy case fits on the nodes running.`;
+}
+
+function nodesAccuracy(pool) {
+  const accuracy = pool.accuracy;
+  if (pool.peak_nodes_needed === null) return "";
+  if (!accuracy.scored_minutes) {
+    return "Its accuracy appears here once its first forecasts of requested CPU can be checked against what was requested, within the hour.";
+  }
+  const pct = (value) => `${(value * 100).toFixed(1)}%`;
+  const checked =
+    accuracy.scored_minutes < 1440
+      ? `Over the ${formatDuration(accuracy.scored_minutes * 60)} checked so far`
+      : "Over the last week";
+  return `${checked}, forecasts of the CPU this pool's pods request have been off by ${pct(accuracy.model_error)} on average, against ${pct(accuracy.baseline_error)} for assuming nothing changes. The busy-case line covered ${pct(accuracy.p90_coverage)} of what happened.`;
+}
+
+function nodesFootnote(pool, source) {
+  const parts = [];
+  if (pool.node_startup_seconds !== null) {
+    parts.push(
+      `New nodes took ${formatDuration(pool.node_startup_seconds)} to become Ready (median of the last ${pool.node_startups_observed}).`
+    );
+  }
+  const forecast = pool.workloads_forecast.length;
+  const observed = pool.workloads.length;
+  if (forecast) {
+    const followed =
+      forecast === observed
+        ? observed === 1
+          ? "the one observed workload"
+          : `all ${observed} observed workloads`
+        : `${forecast} of the ${observed} observed workloads`;
+    parts.push(
+      `The forecast follows ${followed} on this pool; everything else is held at what it requests now.`
+    );
+  }
+  parts.push("Advisory: ScaleScope reads nodes but never adds or removes them.");
+  if (source && source.demo_history_days) {
+    parts.push(
+      "Demo: a simulated pool of 4-vCPU nodes scaled by a reactive cluster autoscaler, shared with other workloads whose requests stay steady."
+    );
+  }
+  return parts.join(" ");
+}
+
+function renderPoolsTable(pools) {
+  const wrap = document.getElementById("pools-wrap");
+  wrap.hidden = pools.length < 2;
+  if (wrap.hidden) return;
+  document.getElementById("pools-body").replaceChildren(
+    ...pools.map((pool) => {
+      const row = document.createElement("tr");
+      const cells = [
+        pool.pool,
+        pool.nodes,
+        pool.nodes_needed_now,
+        pool.peak_nodes_needed === null ? "-" : pool.peak_nodes_needed,
+        pool.idle_node_hours_24h.toFixed(1),
+      ];
+      cells.forEach((value, i) => {
+        const cell = document.createElement("td");
+        if (i > 0) cell.className = "num";
+        cell.textContent = String(value);
+        row.appendChild(cell);
+      });
+      return row;
+    })
+  );
+}
+
+function renderNodes(nodes, source) {
+  const body = document.getElementById("nodes-body");
+  body.hidden = !nodes.available;
+  if (!nodes.available) {
+    setText("nodes-headline", nodes.reason);
+    setText("nodes-note", "Advisory");
+    return;
+  }
+  const poolName = nodes.workload_pools[currentWorkload];
+  const pool = nodes.pools.find((p) => p.pool === poolName) || nodes.pools[0];
+  setText(
+    "nodes-note",
+    poolName === pool.pool ? `Pool ${pool.pool}, where this workload runs` : `Pool ${pool.pool}`
+  );
+  setText("nodes-headline", nodesHeadline(pool));
+  setText("fact-nodes", pool.pending_pods ? `${pool.nodes} (${pods(pool.pending_pods)} pending)` : String(pool.nodes));
+  setText(
+    "fact-node-cpu",
+    `${formatPercent(pool.requested_cpu_millicores / pool.allocatable_cpu_millicores)} of ${formatNumber(pool.allocatable_cpu_millicores / 1000)} cores`
+  );
+  setText("fact-node-peak", pool.peak_nodes_needed === null ? "-" : String(pool.peak_nodes_needed));
+  setText("fact-node-idle", pool.idle_node_hours_24h.toFixed(1));
+  setText("nodes-accuracy", nodesAccuracy(pool));
+  setText("nodes-footnote", nodesFootnote(pool, source));
+  renderPoolsTable(nodes.pools);
+  renderNodesChart(pool);
+}
+
+function renderNodesChart(pool) {
+  const history = pool.history;
+  const forecast = pool.forecast;
+  const horizon = forecast ? forecast.nodes_needed.length : 0;
+  const clock = (date) => date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const labels = history.minutes.map((m) => clock(parseTs(m)));
+  if (forecast) {
+    const start = parseTs(forecast.start).getTime();
+    for (let i = 0; i < horizon; i++) labels.push(clock(new Date(start + i * 60000)));
+  }
+  const pad = (n) => new Array(Math.max(n, 0)).fill(null);
+  const count = history.nodes.length;
+  const lastNeeded = count ? history.nodes_needed[count - 1] : null;
+  const datasets = [
+    line("running", [...history.nodes, ...pad(horizon)], themeColor("--blue"), { stepped: true }),
+    line("needed for what pods requested", [...history.nodes_needed, ...pad(horizon)], themeColor("--muted"), {
+      stepped: true,
+      borderWidth: 1,
+    }),
+  ];
+  if (forecast) {
+    datasets.push(
+      line("needed for busy case", [...pad(count - 1), lastNeeded, ...forecast.nodes_needed], themeColor("--orange"), {
+        stepped: true,
+        borderDash: [5, 4],
+      })
+    );
+  }
+  const options = baseChartOptions("nodes", true);
+  options.scales.x.ticks.maxTicksLimit = window.innerWidth < 640 ? 3 : 12;
+  nodesChart = upsertChart(nodesChart, "nodes-chart", labels, datasets, options);
+}
+
+async function refreshNodes() {
+  try {
+    renderNodes(await fetchJson("/api/nodes"), lastSource);
+  } catch (err) {
+    setText("nodes-headline", `Could not load node pools: ${err.message}`);
+  }
+}
+
 async function refreshLearning() {
   if (!currentWorkload) return;
   const workload = currentWorkload;
@@ -930,11 +1091,14 @@ async function loadWorkloads() {
     clearReplayResults();
     refresh();
     refreshLearning();
+    refreshNodes();
   });
   await refresh();
   refreshLearning();
+  refreshNodes();
   setInterval(refresh, POLL_INTERVAL_MS);
   setInterval(refreshLearning, LEARNING_POLL_INTERVAL_MS);
+  setInterval(refreshNodes, LEARNING_POLL_INTERVAL_MS);
 }
 
 Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;

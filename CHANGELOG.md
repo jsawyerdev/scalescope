@@ -4,14 +4,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
-## [Unreleased]
+## [0.17.0]
 
 ### Added
 
+- Node forecasts. Once a minute ScaleScope reads every node and pod and
+  records, per node pool: schedulable nodes, allocatable resources, what
+  pods request (pending pods included), DaemonSet overhead per node, and
+  each new node's measured start-up time. Pools come from the usual
+  managed-cluster labels or `SCALESCOPE_NODE_POOL_LABEL`.
+- Each pool's requested CPU and memory are forecast for the next hour from
+  the workloads' long-memory demand forecasts, moving each workload's pods
+  the way they have followed its demand over the last week, whatever
+  autoscaler runs it. Nodes needed accounts for DaemonSets and the packing
+  the pool actually achieves. Forecasts are scored live against what was
+  then requested, next to "same as now". Read-only: nodes are never
+  changed.
+- Dashboard Nodes panel (nodes running, needed now and over the next hour,
+  idle node-hours in the last day, node start-up time, live accuracy), and
+  `GET /api/nodes`.
+- DEMO mode runs its workload on a simulated node pool scaled by a
+  reactive cluster autoscaler, with three weeks of generated node history.
+- `scripts/eval_node_forecast.py` measures the node forecast.
 - Docs: which signals the forecast models learn from (request rate, else
   total CPU; never memory) and what the others are used for; a "Pods,
   nodes, and cost" section on pairing ScaleScope with a node autoscaler;
   the dependency list; single-replica and node-scaling limitations.
+
+### Changed
+
+- The observer ClusterRole also allows `get`/`list` on Nodes. A
+  namespace-scoped install cannot read nodes; the Nodes panel says so and
+  everything else works as before.
+- Observations record each workload's per-pod memory request and the node
+  pool its pods run on.
 
 ### Fixed
 

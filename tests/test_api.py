@@ -543,3 +543,57 @@ def test_learning_serves_the_day_and_the_forecast_once_trained(
     assert learning["history_days"] == pytest.approx(3, abs=0.01)
     assert len(learning["history"]["values"]) >= 6 * 60 - 1
     assert len(learning["forecast"]["p90"]) == settings.long_horizon_minutes
+
+
+def test_nodes_explain_why_there_is_nothing_to_show(client: TestClient) -> None:
+    from scalescope.nodes import NodePlanner
+
+    cast(NodePlanner, app_state["node_planner"]).refresh(datetime.now(UTC))
+
+    nodes = client.get("/api/nodes").json()
+
+    assert nodes["available"] is False
+    assert "No node data yet" in nodes["reason"]
+
+
+def test_nodes_serve_each_pool_with_its_history(
+    client: TestClient, store: Store
+) -> None:
+    import polars as pl
+
+    from scalescope.nodes import NodePlanner
+    from scalescope.storage import NODE_MINUTE_COLUMNS
+
+    pool = f"pool-{uuid.uuid4().hex[:8]}"
+    now = datetime.now(UTC).replace(second=0, microsecond=0, tzinfo=None)
+    store.insert_node_minutes(
+        pl.DataFrame(
+            [
+                {
+                    "pool": pool,
+                    "minute": now - timedelta(minutes=i),
+                    "nodes": 3,
+                    "allocatable_cpu_millicores": 12000.0,
+                    "allocatable_memory_mb": 48000.0,
+                    # Fits on 2 of the 3 nodes, even at the lowest packing.
+                    "requested_cpu_millicores": 5000.0,
+                    "requested_memory_mb": 9000.0,
+                    "daemonset_cpu_millicores": 300.0,
+                    "daemonset_memory_mb": 600.0,
+                    "pending_pods": 0,
+                }
+                for i in range(90)
+            ]
+        ).select(NODE_MINUTE_COLUMNS)
+    )
+    cast(NodePlanner, app_state["node_planner"]).refresh(datetime.now(UTC))
+
+    nodes = client.get("/api/nodes").json()
+
+    served = {p["pool"]: p for p in nodes["pools"]}[pool]
+    assert nodes["available"] is True
+    assert served["nodes"] == 3
+    assert served["nodes_needed_now"] == 2
+    assert served["forecast"] is None
+    assert len(served["history"]["nodes"]) == 90
+    assert served["idle_node_hours_24h"] == pytest.approx(1.5)

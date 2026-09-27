@@ -2,9 +2,10 @@
 
 Populates the same observation schema DEMO mode's simulator produces, from
 a real Deployment's Pod/metrics.k8s.io state. Uses only get/list verbs on
-apps/v1 Deployments, core/v1 Pods, and (if metrics-server is installed)
-metrics.k8s.io PodMetrics (the ClusterRole in k8s/scalescope/, or the
-namespace Role in k8s/rbac/). Never writes to the cluster.
+apps/v1 Deployments, core/v1 Pods and Nodes, and (if metrics-server is
+installed) metrics.k8s.io PodMetrics (the ClusterRole in k8s/scalescope/,
+or the namespace Role in k8s/rbac/, which cannot see nodes). Never writes
+to the cluster.
 
 Request rate, p95 latency, error rate, and CPU throttling are not
 derivable from the Kubernetes API or metrics-server. The first three come
@@ -78,6 +79,30 @@ def _parse_prometheus_gauges(text: str, names: set[str]) -> dict[str, float]:
 
 # Kubernetes resource.Quantity suffixes. Binary suffixes are two characters
 # and must be matched before the one-character decimal ones.
+_MIB = 1024 * 1024
+
+# Labels that name a node's pool on the common managed platforms, most
+# specific first. SCALESCOPE_NODE_POOL_LABEL overrides them.
+POOL_LABELS = (
+    "karpenter.sh/nodepool",
+    "eks.amazonaws.com/nodegroup",
+    "cloud.google.com/gke-nodepool",
+    "kubernetes.azure.com/agentpool",
+    "agentpool",
+    "doks.digitalocean.com/node-pool",
+)
+DEFAULT_POOL = "default"
+
+
+def node_pool(labels: dict[str, str], label: str | None = None) -> str:
+    """The pool a node with `labels` belongs to."""
+    for key in (label,) if label else POOL_LABELS:
+        value = labels.get(key)
+        if value:
+            return value
+    return DEFAULT_POOL
+
+
 _BINARY_QUANTITY_SUFFIXES = {
     "Ki": 1024.0,
     "Mi": 1024.0**2,
@@ -178,14 +203,156 @@ def _parse_cpu_millicores(value: str) -> float:
     return _parse_quantity(value) * 1000
 
 
-def _cpu_request_millicores(containers: list[Any]) -> float:
-    total = 0.0
-    for container in containers:
+def _container_requests(containers: list[Any] | None, resource: str) -> list[float]:
+    values = []
+    for container in containers or []:
         resource_requests = (container.resources and container.resources.requests) or {}
-        cpu_request = resource_requests.get("cpu")
-        if cpu_request:
-            total += _parse_cpu_millicores(cpu_request)
-    return total
+        value = resource_requests.get(resource)
+        values.append(_parse_quantity(value) if value else 0.0)
+    return values
+
+
+def _cpu_request_millicores(containers: list[Any]) -> float:
+    return sum(_container_requests(containers, "cpu")) * 1000
+
+
+def _memory_request_mb(containers: list[Any]) -> float:
+    return sum(_container_requests(containers, "memory")) / _MIB
+
+
+def _pod_requests(pod: Any) -> tuple[float, float]:
+    """(CPU millicores, memory MB) the scheduler reserves for `pod`.
+
+    As Kubernetes computes it: the larger of the containers' sum and any
+    one init container, since init containers run before the rest.
+    """
+    spec = pod.spec
+    init = getattr(spec, "init_containers", None) or []
+    cpu = max(
+        [sum(_container_requests(spec.containers, "cpu"))]
+        + _container_requests(init, "cpu")
+    )
+    memory = max(
+        [sum(_container_requests(spec.containers, "memory"))]
+        + _container_requests(init, "memory")
+    )
+    return cpu * 1000, memory / _MIB
+
+
+_CONTROL_PLANE_LABELS = (
+    "node-role.kubernetes.io/control-plane",
+    "node-role.kubernetes.io/master",
+)
+# A Ready transition later than this after creation is a restart, not a start.
+_MAX_STARTUP_SECONDS = 3600.0
+
+
+def _is_ready(node: Any) -> tuple[bool, datetime | None]:
+    for condition in node.status.conditions or []:
+        if condition.type == "Ready":
+            return condition.status == "True", condition.last_transition_time
+    return False, None
+
+
+def _owned_by_daemonset(pod: Any) -> bool:
+    return any(
+        owner.kind == "DaemonSet" for owner in pod.metadata.owner_references or []
+    )
+
+
+@dataclass(frozen=True)
+class NodeCollection:
+    """One minute of node-pool state (rows of `storage.NODE_MINUTE_COLUMNS`)."""
+
+    pools: list[dict[str, Any]]
+    # (node, pool, created, seconds from creation to Ready)
+    startups: list[tuple[str, str, datetime, float]]
+    pool_by_node: dict[str, str]
+
+
+def summarize_nodes(
+    nodes: list[Any], pods: list[Any], minute: datetime, pool_label: str | None
+) -> NodeCollection:
+    """Per-pool capacity and requests from a node list and a pod list.
+
+    Counts Ready, schedulable, non-control-plane nodes. Requests are those
+    of pods placed on counted nodes, plus pending pods: a pending pod
+    counts toward the pool its node selector names, or the only pool.
+    """
+    pool_by_node: dict[str, str] = {}
+    pools: dict[str, dict[str, Any]] = {}
+    startups: list[tuple[str, str, datetime, float]] = []
+    counted: set[str] = set()
+    for node in nodes:
+        labels = node.metadata.labels or {}
+        if any(label in labels for label in _CONTROL_PLANE_LABELS):
+            continue
+        name = str(node.metadata.name)
+        pool = node_pool(labels, pool_label)
+        pool_by_node[name] = pool
+        ready, ready_since = _is_ready(node)
+        if not ready or getattr(node.spec, "unschedulable", False):
+            continue
+        counted.add(name)
+        allocatable = node.status.allocatable or {}
+        entry = pools.setdefault(
+            pool,
+            {
+                "pool": pool,
+                "minute": minute,
+                "nodes": 0,
+                "allocatable_cpu_millicores": 0.0,
+                "allocatable_memory_mb": 0.0,
+                "requested_cpu_millicores": 0.0,
+                "requested_memory_mb": 0.0,
+                "daemonset_cpu_millicores": 0.0,
+                "daemonset_memory_mb": 0.0,
+                "pending_pods": 0,
+            },
+        )
+        entry["nodes"] += 1
+        entry["allocatable_cpu_millicores"] += _parse_cpu_millicores(
+            allocatable.get("cpu", "0")
+        )
+        entry["allocatable_memory_mb"] += (
+            _parse_quantity(allocatable.get("memory", "0")) / _MIB
+        )
+        created = node.metadata.creation_timestamp
+        if created is not None and ready_since is not None:
+            seconds = (ready_since - created).total_seconds()
+            if 0 < seconds <= _MAX_STARTUP_SECONDS:
+                startups.append((name, pool, created, seconds))
+
+    only_pool = next(iter(pools)) if len(pools) == 1 else None
+    for pod in pods:
+        node_name = getattr(pod.spec, "node_name", None)
+        if node_name:
+            if node_name not in counted:
+                continue
+            entry = pools[pool_by_node[node_name]]
+        elif pod.status.phase == "Pending":
+            selector = getattr(pod.spec, "node_selector", None) or {}
+            named = next(
+                (
+                    selector[key]
+                    for key in ((pool_label,) if pool_label else POOL_LABELS)
+                    if key in selector
+                ),
+                only_pool,
+            )
+            if named not in pools:
+                continue
+            entry = pools[named]
+            entry["pending_pods"] += 1
+        else:
+            continue
+        cpu, memory = _pod_requests(pod)
+        entry["requested_cpu_millicores"] += cpu
+        entry["requested_memory_mb"] += memory
+        if _owned_by_daemonset(pod):
+            entry["daemonset_cpu_millicores"] += cpu
+            entry["daemonset_memory_mb"] += memory
+    return NodeCollection(list(pools.values()), startups, pool_by_node)
 
 
 def _selector_matches(selector: object, labels: dict[str, str]) -> bool:
@@ -263,7 +430,8 @@ class KubernetesObservationCollector:
 
     Each tick costs one Deployment list, plus one Pod list and one PodMetrics
     list per namespace that has Deployments, plus one query per configured
-    Prometheus signal, however many Deployments there are.
+    Prometheus signal, however many Deployments there are. `collect_nodes`,
+    run once a minute, costs one Node list and one cluster-wide Pod list.
     """
 
     def __init__(
@@ -272,6 +440,7 @@ class KubernetesObservationCollector:
         metrics_urls: dict[str, str] | None = None,
         prometheus_url: str | None = None,
         prometheus_queries: PrometheusQueries | None = None,
+        node_pool_label: str | None = None,
     ) -> None:
         self.auth_type = load_k8s_config(kubeconfig_path)
         self.auth_identity = (
@@ -283,6 +452,9 @@ class KubernetesObservationCollector:
         self._prometheus_url = prometheus_url.rstrip("/") if prometheus_url else None
         self._prometheus_queries = prometheus_queries or PrometheusQueries()
         self._failing_queries: set[str] = set()
+        self._node_pool_label = node_pool_label
+        # Replaced whole by collect_nodes (another thread); read per tick.
+        self._pool_by_node: dict[str, str] = {}
         self._apps = client.AppsV1Api()
         self._core = client.CoreV1Api()
         self._custom = client.CustomObjectsApi()
@@ -331,6 +503,33 @@ class KubernetesObservationCollector:
                 except KubernetesUnavailableError as exc:
                     errors.append(f"{namespace}/{deployment.metadata.name}: {exc}")
         return CollectionResult(targets=targets, rows=rows, errors=errors)
+
+    def collect_nodes(self, minute: datetime) -> NodeCollection:
+        """Summarize every node pool; one node list and one pod list.
+
+        Raises KubernetesUnavailableError when nodes or pods cluster-wide
+        cannot be listed (for example, namespace-scoped RBAC).
+        """
+        try:
+            nodes = self._core.list_node(
+                _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS
+            ).items
+            pods = self._core.list_pod_for_all_namespaces(
+                field_selector="status.phase!=Succeeded,status.phase!=Failed",
+                _request_timeout=K8S_REQUEST_TIMEOUT_SECONDS,
+            ).items
+        except (ApiException, Urllib3HTTPError) as exc:
+            _raise_unavailable("could not list nodes and pods cluster-wide", exc)
+        try:
+            collection = summarize_nodes(
+                list(nodes), list(pods), minute, self._node_pool_label
+            )
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise KubernetesUnavailableError(
+                f"malformed node or pod data: {exc!r}"
+            ) from exc
+        self._pool_by_node = collection.pool_by_node
+        return collection
 
     def _list_deployments(self, namespaces: tuple[str, ...]) -> list[Any]:
         try:
@@ -417,6 +616,9 @@ class KubernetesObservationCollector:
             cpu_request_per_pod = _cpu_request_millicores(
                 deployment.spec.template.spec.containers
             )
+            memory_request_per_pod = _memory_request_mb(
+                deployment.spec.template.spec.containers
+            )
             cpu_requested = sum(
                 _cpu_request_millicores(pod.spec.containers) for pod in pods
             )
@@ -460,6 +662,8 @@ class KubernetesObservationCollector:
             "cpu_usage_pct": round(cpu_usage_pct, 2),
             "cpu_usage_millicores": round(cpu_used, 1),
             "cpu_request_millicores": round(cpu_request_per_pod, 1),
+            "memory_request_mb": round(memory_request_per_pod, 1),
+            "node_pool": self._workload_pool(pods),
             "cpu_throttled_pct": round(throttled_pct, 2),
             "memory_usage_mb": round(memory_used / (1024 * 1024), 2),
             "latency_p95_ms": round(latency, 2),
@@ -471,6 +675,16 @@ class KubernetesObservationCollector:
                 for status in (pod.status.container_statuses or [])
             ),
         }
+
+    def _workload_pool(self, pods: list[Any]) -> str:
+        """The pool most of the workload's pods run on; "" if not known."""
+        pool_by_node = self._pool_by_node
+        pools = [
+            pool_by_node[name]
+            for pod in pods
+            if (name := getattr(pod.spec, "node_name", None)) in pool_by_node
+        ]
+        return max(set(pools), key=pools.count) if pools else ""
 
     def _scrape_workload_metrics(self, metrics_url: str | None) -> dict[str, float]:
         if not metrics_url:

@@ -202,6 +202,9 @@ class Settings:
     )
     # Optional per-pod signals for OBSERVE mode: one instant query each, whose
     # series carry `namespace` and `pod` labels; an empty query is skipped.
+    node_pool_label: str | None = field(
+        default_factory=lambda: _optional_env("SCALESCOPE_NODE_POOL_LABEL")
+    )
     prometheus_url: str | None = field(
         default_factory=lambda: _optional_env("SCALESCOPE_PROMETHEUS_URL")
     )

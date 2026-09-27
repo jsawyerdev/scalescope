@@ -57,7 +57,7 @@ The image is published (amd64/arm64) as
 `ghcr.io/jsawyerdev/scalescope-sample-workload`, so no build is needed:
 
 ```
-kubectl apply -k "https://github.com/jsawyerdev/scalescope//sample-workload/k8s?ref=v0.16.1"
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//sample-workload/k8s?ref=v0.17.0"
 # or, from a clone:
 kubectl apply -k sample-workload/k8s
 ```

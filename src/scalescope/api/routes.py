@@ -25,6 +25,13 @@ from scalescope.k8s_collector import workload_id
 from scalescope.learning import Learner
 from scalescope.models.base import Forecast
 from scalescope.models.registry import ACTUATION_MODEL, MODELS
+from scalescope.nodes import (
+    NodePlanner,
+    PoolPlan,
+    idle_node_hours,
+    median_or_none,
+    nodes_needed_history,
+)
 from scalescope.replay import REPLAY_MAX_OBSERVATIONS, REPLAY_MIN_HISTORY, replay_score
 from scalescope.scaling_replay import capacity_training_rows, replay_scaling
 from scalescope.state import app_state
@@ -57,6 +64,11 @@ def get_store() -> Store:
 def get_learner() -> Learner:
     learner: Learner = app_state["learner"]
     return learner
+
+
+def get_node_planner() -> NodePlanner:
+    planner: NodePlanner = app_state["node_planner"]
+    return planner
 
 
 @router.get("/source")
@@ -402,6 +414,100 @@ def get_learning(workload: str) -> dict[str, Any]:
             if forecast is not None
             else None
         ),
+    }
+
+
+def _pool_summary(
+    plan: PoolPlan, planner: NodePlanner, store: Store, now: datetime
+) -> dict[str, Any]:
+    state = plan.now
+    startups = planner.startup_seconds(plan.pool, now)
+    accuracy = planner.accuracy(plan.pool, now)
+    scored = int(accuracy["minutes"].sum()) if not accuracy.is_empty() else 0
+
+    def weighted(column: str) -> float | None:
+        if not scored:
+            return None
+        return float((accuracy[column] * accuracy["minutes"]).sum() / scored)
+
+    day = store.node_history(now.replace(tzinfo=None) - timedelta(days=1), plan.pool)
+    history = plan.history
+    peak = max(plan.nodes_needed) if plan.nodes_needed else None
+    return {
+        "pool": plan.pool,
+        "as_of": state["minute"],
+        "nodes": state["nodes"],
+        "pending_pods": state["pending_pods"],
+        "allocatable_cpu_millicores": state["allocatable_cpu_millicores"],
+        "requested_cpu_millicores": state["requested_cpu_millicores"],
+        "allocatable_memory_mb": state["allocatable_memory_mb"],
+        "requested_memory_mb": state["requested_memory_mb"],
+        "packing": plan.packing,
+        "nodes_needed_now": plan.nodes_needed_now,
+        "peak_nodes_needed": peak,
+        "peak_in_minutes": (
+            plan.nodes_needed.index(peak) if peak is not None else None
+        ),
+        "workloads": plan.workloads,
+        "workloads_forecast": plan.workloads_forecast,
+        "node_startup_seconds": median_or_none(startups),
+        "node_startups_observed": len(startups),
+        "idle_node_hours_24h": idle_node_hours(day, plan.packing),
+        "accuracy": {
+            "scored_minutes": scored,
+            "model_error": weighted("model_error"),
+            "baseline_error": weighted("baseline_error"),
+            "p90_coverage": weighted("p90_coverage"),
+        },
+        "history": {
+            "minutes": history["minute"].to_list(),
+            "nodes": history["nodes"].to_list(),
+            "nodes_needed": nodes_needed_history(history, plan.packing).tolist(),
+            "requested_cpu_millicores": history["requested_cpu_millicores"].to_list(),
+            "allocatable_cpu_millicores": history[
+                "allocatable_cpu_millicores"
+            ].to_list(),
+        },
+        "forecast": (
+            {
+                "start": plan.forecast_start,
+                "requested_cpu_p50": plan.requested_cpu_p50,
+                "requested_cpu_p90": plan.requested_cpu_p90,
+                "nodes_needed": plan.nodes_needed,
+            }
+            if plan.forecast_start is not None
+            else None
+        ),
+    }
+
+
+@router.get("/nodes")
+def get_nodes() -> dict[str, Any]:
+    """Each node pool: capacity, requests, nodes needed now and over the next
+    hour, idle node-hours, node start-up time, and live forecast accuracy.
+
+    Advisory: ScaleScope reads nodes but never changes them.
+    """
+    store = get_store()
+    planner = get_node_planner()
+    now = datetime.now(UTC)
+    plans = planner.plans()
+    error = app_state["source"].get("nodes_error")
+    latest = store.latest_observations(now - timedelta(minutes=5))
+    return {
+        "available": bool(plans),
+        "reason": (
+            None
+            if plans
+            else error or "No node data yet: pools are sampled once a minute."
+        ),
+        "horizon_minutes": settings.long_horizon_minutes,
+        "workload_pools": {
+            row["workload"]: row["node_pool"]
+            for row in latest.iter_rows(named=True)
+            if row["node_pool"]
+        },
+        "pools": [_pool_summary(plan, planner, store, now) for plan in plans.values()],
     }
 
 
