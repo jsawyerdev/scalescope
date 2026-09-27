@@ -1,3 +1,3 @@
-fastapi>=0.115
+fastapi>=0.141.1
 uvicorn[standard]>=0.32
 prometheus-client>=0.21
