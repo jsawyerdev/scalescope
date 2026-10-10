@@ -4,6 +4,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions match `pyproject.toml`'s `[project].version`, surfaced at runtime via
 `GET /api/source` and shown in the dashboard footer.
 
+## [0.17.1]
+
+### Changed
+
+- Both images (`scalescope` and `scalescope-sample-workload`) are built on
+  Python 3.14.8, up from 3.14.7, and the Dockerfiles pin that patch release
+  instead of the floating `python:3.14-slim` tag. No code changes.
+
 ## [0.17.0]
 
 ### Added

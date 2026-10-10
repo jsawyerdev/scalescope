@@ -193,7 +193,7 @@ ScaleScope does not run a Prometheus server of its own. It reads one you
 already have, one instant query per signal per tick.
 
 ```
-kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.17.0"
+kubectl apply -k "https://github.com/jsawyerdev/scalescope//k8s/scalescope?ref=v0.17.1"
 kubectl -n scalescope-system port-forward svc/scalescope 8000:80
 ```
 
