@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM python:3.14.8-slim AS builder
+FROM python:3.15.0-slim AS builder
 
 # No PYTHONOPTIMIZE here: pip would then precompile only *.opt-1.pyc files,
 # which the runtime stage (no -O) never loads, and with
@@ -32,7 +32,7 @@ COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade --no-cache-dir --no-deps .
 
-FROM python:3.14.8-slim AS runtime
+FROM python:3.15.0-slim AS runtime
 
 RUN apt-get update -q && \
     apt-get upgrade -qy && \
